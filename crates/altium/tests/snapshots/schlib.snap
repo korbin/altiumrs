@@ -1,0 +1,26 @@
+---
+source: crates/altium/tests/json_snapshots.rs
+expression: sch_library_summary(&library)
+---
+{
+  "components": [
+    {
+      "arcs": 0,
+      "comment": "*",
+      "description": null,
+      "designator_prefix": "IC?",
+      "implementations": 0,
+      "labels": 0,
+      "lines": 0,
+      "name": "ST MICROELECTRONICS STM32U535CBUX UFQFPN48",
+      "parameters": 2,
+      "pins": 48,
+      "polygons": 0,
+      "polylines": 0,
+      "raw_records": 0,
+      "rectangles": 2
+    }
+  ],
+  "embedded_images": 0,
+  "section_keys": 1
+}

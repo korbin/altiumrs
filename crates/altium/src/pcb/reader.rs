@@ -1,0 +1,1699 @@
+//! Reader for `.PcbLib` and `.PcbDoc` files.
+
+#![allow(clippy::field_reassign_with_default)]
+
+use std::collections::BTreeMap;
+use std::io::{Cursor, Read, Seek};
+use std::path::Path;
+
+use flate2::read::ZlibDecoder;
+use indexmap::IndexMap;
+use tokio::io::AsyncRead;
+
+use super::binary::{ObjectId, PrimitiveFlags, read_common_prefix, read_coord_point};
+use super::component::Component;
+use super::library::Library;
+use super::model3d::Model3d;
+use super::primitives::{Arc, ComponentBody, Fill, Pad, Region, Text, Track, Via};
+use crate::binary::BinaryReader;
+use crate::compound::CompoundFile;
+use crate::coord::{Coord, CoordPoint};
+use crate::diagnostic::Diagnostic;
+use crate::encoding;
+use crate::enums::{PadHoleType, PadShape, PcbStrokeFont, PcbTextKind, TextJustification};
+use crate::error::{Error, Result};
+use crate::parameter::ParameterMap;
+
+// Library reader
+
+impl Library {
+    /// Parse a `.PcbLib` file from an in-memory buffer.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let mut cf = CompoundFile::open(bytes)?;
+        let mut library = Self::default();
+        let mut diagnostics = Vec::new();
+
+        read_file_header(&mut cf, &mut library, &mut diagnostics)?;
+        preserve_root_streams(&mut cf, &mut library)?;
+        let section_keys = read_section_keys(&mut cf)?;
+        library.section_keys = section_keys.clone();
+        read_library(&mut cf, &mut library, &section_keys, &mut diagnostics)?;
+
+        library.diagnostics = diagnostics;
+        Ok(library)
+    }
+
+    /// Read a `.PcbLib` from disk.
+    pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
+        let bytes = tokio::fs::read(path).await?;
+        Self::from_bytes(bytes)
+    }
+
+    /// Read a `.PcbLib` from any `AsyncRead`.
+    pub async fn read_async<R>(mut reader: R) -> Result<Self>
+    where
+        R: AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        Self::from_bytes(bytes)
+    }
+}
+
+fn read_file_header(
+    cf: &mut CompoundFile,
+    library: &mut Library,
+    _diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let Some(data) = cf.try_read_stream("FileHeader")? else {
+        return Ok(());
+    };
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+    let block_len = br.read_i32()?;
+    if block_len <= 0 {
+        return Ok(());
+    }
+    // Version string (Pascal short).
+    let str_len = br.read_u8()? as u32;
+    br.skip(u64::from(str_len))?;
+    let consumed = 4u64 + 1 + u64::from(str_len);
+    let block_total = 4u64 + block_len as u64;
+    if consumed < block_total {
+        br.skip(block_total - consumed)?;
+    }
+
+    // Three trailing Pascal short strings.
+    if br.has_more()? {
+        let len = br.read_u8()? as u32;
+        if len > 0 {
+            br.skip(u64::from(len))?;
+        }
+    }
+    if br.has_more()? {
+        let len = br.read_u8()? as u32;
+        if len > 0 {
+            br.skip(u64::from(len))?;
+        }
+    }
+    if br.has_more()? {
+        let len = br.read_u8()? as usize;
+        if len > 0 {
+            let mut buf = vec![0u8; len];
+            br.read_exact(&mut buf)?;
+            library.unique_id = encoding::decode(&buf);
+        }
+    }
+    Ok(())
+}
+
+fn preserve_root_streams(cf: &mut CompoundFile, library: &mut Library) -> Result<()> {
+    if cf.is_storage("FileVersionInfo") {
+        let entries = cf.list_children("FileVersionInfo")?;
+        for entry in entries {
+            if entry.is_stream {
+                let data = cf.read_stream(format!("FileVersionInfo/{}", entry.name))?;
+                library
+                    .additional_root_streams
+                    .insert(format!("FileVersionInfo/{}", entry.name), data);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn read_section_keys(cf: &mut CompoundFile) -> Result<BTreeMap<String, String>> {
+    let mut map = BTreeMap::new();
+    let Some(data) = cf.try_read_stream("SectionKeys")? else {
+        return Ok(map);
+    };
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+    let count = br.read_i32()?;
+    for _ in 0..count {
+        let lib_ref = br.read_pascal_string()?;
+        let section_key = br.read_pascal_string_block()?;
+        map.insert(lib_ref, section_key);
+    }
+    Ok(map)
+}
+
+/// Parse a `[i32 size][u8 len][len bytes][padding]` block (used for refnames
+/// in the `SectionKeys` stream).
+#[allow(dead_code)]
+fn read_pascal_block<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<String> {
+    let (_flags, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(String::new());
+    }
+    let len = br.read_u8()? as u32;
+    let mut consumed = 1u32;
+    let s = if len == 0 {
+        String::new()
+    } else {
+        let mut buf = vec![0u8; len as usize];
+        br.read_exact(&mut buf)?;
+        consumed += len;
+        encoding::decode(&buf)
+    };
+    if consumed < size {
+        br.skip(u64::from(size - consumed))?;
+    }
+    Ok(s)
+}
+
+fn read_library(
+    cf: &mut CompoundFile,
+    library: &mut Library,
+    section_keys: &BTreeMap<String, String>,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    if !cf.is_storage("Library") {
+        return Err(Error::corrupt_in("missing Library storage", "Library"));
+    }
+    // The Header stream is metadata only; we ignore its contents.
+    let data = cf.read_stream("Library/Data")?;
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+
+    // Library-level parameters
+    let header_params = read_param_map(&mut br)?;
+    if !header_params.is_empty() {
+        let mut typed = BTreeMap::new();
+        for (name, value, _is_utf8) in header_params.iter() {
+            typed.insert(name.to_string(), value.to_string());
+        }
+        library.library_parameters = Some(typed);
+    }
+
+    // Component count + entries.
+    let count = br.read_u32()?;
+    for _ in 0..count {
+        let ref_name = br.read_pascal_string_block()?;
+        let section_key = section_keys
+            .get(&ref_name)
+            .cloned()
+            .unwrap_or_else(|| section_key_from_name(&ref_name));
+        if let Some(component) = read_footprint(cf, &section_key, diagnostics)? {
+            library.components.push(component);
+        }
+    }
+
+    // Preserve unknown library children.
+    let known_children: &[&str] = &["Header", "Data", "Models"];
+    let entries = cf.list_children("Library")?;
+    for entry in entries {
+        if known_children
+            .iter()
+            .any(|n| entry.name.eq_ignore_ascii_case(n))
+        {
+            continue;
+        }
+        if entry.is_stream {
+            let data = cf.read_stream(format!("Library/{}", entry.name))?;
+            library.additional_library_streams.insert(entry.name, data);
+        } else {
+            let inner = cf.list_children(format!("Library/{}", entry.name))?;
+            for sub in inner {
+                if sub.is_stream {
+                    let data = cf.read_stream(format!("Library/{}/{}", entry.name, sub.name))?;
+                    library
+                        .additional_library_streams
+                        .insert(format!("{}/{}", entry.name, sub.name), data);
+                }
+            }
+        }
+    }
+
+    if cf.is_storage("Library/Models") {
+        read_models(cf, library)?;
+    }
+
+    Ok(())
+}
+
+fn read_models(cf: &mut CompoundFile, library: &mut Library) -> Result<()> {
+    let mut metas: Vec<BTreeMap<String, String>> = Vec::new();
+    if let Some(data) = cf.try_read_stream("Library/Models/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let len = br.read_i32()?;
+            if len <= 0 {
+                break;
+            }
+            let mut buf = vec![0u8; len as usize];
+            br.read_exact(&mut buf)?;
+            let s = encoding::decode(&strip_nulls(&buf));
+            let mut meta = BTreeMap::new();
+            for part in s.split('|').filter(|p| !p.is_empty()) {
+                if let Some(eq) = part.find('=') {
+                    meta.insert(part[..eq].to_uppercase(), part[eq + 1..].to_owned());
+                }
+            }
+            metas.push(meta);
+        }
+    }
+
+    for i in 0.. {
+        let path = format!("Library/Models/{i}");
+        let Some(compressed) = cf.try_read_stream(&path)? else {
+            break;
+        };
+        let mut model = Model3d::default();
+        if let Some(meta) = metas.get(i) {
+            if let Some(v) = meta.get("ID") {
+                model.id = v.clone();
+            }
+            if let Some(v) = meta.get("NAME") {
+                model.name = v.clone();
+            }
+            if let Some(v) = meta.get("EMBED") {
+                model.is_embedded = v.eq_ignore_ascii_case("TRUE");
+            }
+            if let Some(v) = meta.get("MODELSOURCE") {
+                model.model_source = v.clone();
+            }
+            if let Some(v) = meta.get("ROTX").and_then(|x| x.parse().ok()) {
+                model.rotation_x = v;
+            }
+            if let Some(v) = meta.get("ROTY").and_then(|x| x.parse().ok()) {
+                model.rotation_y = v;
+            }
+            if let Some(v) = meta.get("ROTZ").and_then(|x| x.parse().ok()) {
+                model.rotation_z = v;
+            }
+            if let Some(v) = meta.get("DZ").and_then(|x| x.parse().ok()) {
+                model.dz = v;
+            }
+            if let Some(v) = meta.get("CHECKSUM").and_then(|x| x.parse().ok()) {
+                model.checksum = v;
+            }
+        }
+        if !compressed.is_empty() {
+            let mut decoder = ZlibDecoder::new(&compressed[..]);
+            let mut step = Vec::new();
+            decoder.read_to_end(&mut step).map_err(Error::Io)?;
+            model.step_data = String::from_utf8_lossy(&step).into_owned();
+        }
+        library.models.push(model);
+    }
+
+    Ok(())
+}
+
+fn strip_nulls(buf: &[u8]) -> Vec<u8> {
+    let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    buf[..end].to_vec()
+}
+
+fn section_key_from_name(name: &str) -> String {
+    let trimmed = if name.len() > 31 { &name[..31] } else { name };
+    trimmed.replace('/', "_")
+}
+
+fn read_footprint(
+    cf: &mut CompoundFile,
+    section_key: &str,
+    _diagnostics: &mut Vec<Diagnostic>,
+) -> Result<Option<Component>> {
+    if !cf.is_storage(section_key) {
+        return Ok(None);
+    }
+    let mut component = Component::default();
+
+    if let Some(data) = cf.try_read_stream(format!("{section_key}/Parameters"))? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        let params = read_param_map(&mut br)?;
+        apply_component_parameters(&mut component, &params);
+    }
+
+    let wide_strings = read_wide_strings(cf, section_key)?;
+
+    // Preserve additional component-level streams.
+    let known: &[&str] = &["Header", "Parameters", "WideStrings", "Data"];
+    let entries = cf.list_children(section_key)?;
+    for entry in entries {
+        if known.iter().any(|n| entry.name.eq_ignore_ascii_case(n)) {
+            continue;
+        }
+        if entry.is_stream {
+            let data = cf.read_stream(format!("{section_key}/{}", entry.name))?;
+            component.additional_streams.insert(entry.name, data);
+        } else {
+            let inner = cf.list_children(format!("{section_key}/{}", entry.name))?;
+            for sub in inner {
+                if sub.is_stream {
+                    let data =
+                        cf.read_stream(format!("{section_key}/{}/{}", entry.name, sub.name))?;
+                    component
+                        .additional_streams
+                        .insert(format!("{}/{}", entry.name, sub.name), data);
+                }
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream(format!("{section_key}/Data"))? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        let pattern = br.read_pascal_string_block()?;
+        if component.name.is_empty() {
+            component.name = pattern;
+        }
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            match ObjectId::from_byte(id) {
+                Some(ObjectId::Arc) => {
+                    if let Some(arc) = read_arc(&mut br)? {
+                        component.arcs.push(arc);
+                    }
+                }
+                Some(ObjectId::Pad) => {
+                    if let Some(pad) = read_pad(&mut br)? {
+                        component.pads.push(pad);
+                    }
+                }
+                Some(ObjectId::Via) => {
+                    if let Some(via) = read_via(&mut br)? {
+                        component.vias.push(via);
+                    }
+                }
+                Some(ObjectId::Track) => {
+                    if let Some(track) = read_track(&mut br)? {
+                        component.tracks.push(track);
+                    }
+                }
+                Some(ObjectId::Text) => {
+                    if let Some(text) = read_text(&mut br, &wide_strings)? {
+                        component.texts.push(text);
+                    }
+                }
+                Some(ObjectId::Fill) => {
+                    if let Some(fill) = read_fill(&mut br)? {
+                        component.fills.push(fill);
+                    }
+                }
+                Some(ObjectId::Region) => {
+                    if let Some(region) = read_region(&mut br)? {
+                        component.regions.push(region);
+                    }
+                }
+                Some(ObjectId::ComponentBody) => {
+                    if let Some(body) = read_component_body(&mut br)? {
+                        component.component_bodies.push(body);
+                    }
+                }
+                None => {
+                    br.skip_block()?;
+                }
+            }
+        }
+    }
+
+    Ok(Some(component))
+}
+
+fn read_wide_strings(cf: &mut CompoundFile, section_key: &str) -> Result<Vec<String>> {
+    let Some(data) = cf.try_read_stream(format!("{section_key}/WideStrings"))? else {
+        return Ok(Vec::new());
+    };
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+    let map = read_param_map(&mut br)?;
+    let mut out = Vec::new();
+    for i in 0.. {
+        let key = format!("ENCODEDTEXT{i}");
+        let Some(encoded) = map.get(&key) else {
+            break;
+        };
+        out.push(decode_wide_string(encoded));
+    }
+    Ok(out)
+}
+
+fn decode_wide_string(encoded: &str) -> String {
+    encoded
+        .split(',')
+        .filter_map(|p| p.parse::<u32>().ok())
+        .filter_map(char::from_u32)
+        .collect()
+}
+
+fn apply_component_parameters(component: &mut Component, params: &ParameterMap) {
+    let mut consumed = Vec::<&str>::new();
+    if let Some(v) = params.get("PATTERN") {
+        component.name = v.to_string();
+        consumed.push("PATTERN");
+    }
+    if let Some(v) = params.get("DESCRIPTION") {
+        component.description = Some(v.to_string());
+        consumed.push("DESCRIPTION");
+    }
+    if let Some(v) = params.get("HEIGHT") {
+        if let Ok(c) = v.parse::<Coord>() {
+            component.height = c;
+        }
+        consumed.push("HEIGHT");
+    }
+    if let Some(v) = params.get("ITEMGUID") {
+        component.item_guid = Some(v.to_string());
+        consumed.push("ITEMGUID");
+    }
+    if let Some(v) = params.get("REVISIONGUID") {
+        component.item_revision_guid = Some(v.to_string());
+        consumed.push("REVISIONGUID");
+    }
+    component.additional_parameters = extract_remaining_parameters(params, &consumed);
+}
+
+fn extract_remaining_parameters(
+    params: &ParameterMap,
+    consumed: &[&str],
+) -> BTreeMap<String, String> {
+    let mut consumed_upper: Vec<String> = consumed.iter().map(|s| s.to_ascii_uppercase()).collect();
+    consumed_upper.sort();
+    let mut out = BTreeMap::new();
+    for (name, value, _) in params.iter() {
+        if consumed_upper
+            .binary_search(&name.to_ascii_uppercase())
+            .is_err()
+        {
+            out.insert(name.to_string(), value.to_string());
+        }
+    }
+    out
+}
+
+fn read_param_map<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<ParameterMap> {
+    let raw = br.read_c_string_block()?;
+    Ok(ParameterMap::parse(&raw))
+}
+
+// Primitives
+
+fn read_arc<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Arc>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let center = read_coord_point(br)?;
+    let radius = Coord::from_raw(br.read_i32()?);
+    let start_angle = br.read_f64()?;
+    let end_angle = br.read_f64()?;
+    let width = Coord::from_raw(br.read_i32()?);
+
+    let consumed = br.position()? - start;
+    let remaining = u64::from(size) - consumed;
+    if remaining > 0 {
+        br.skip(remaining)?;
+    }
+
+    let pf = PrimitiveFlags::decode(flags_bits);
+    let mut arc = Arc {
+        center,
+        radius,
+        start_angle,
+        end_angle,
+        width,
+        layer: i32::from(layer),
+        ..Arc::default()
+    };
+    arc.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
+    arc.is_locked = pf.is_locked;
+    arc.is_tenting_top = pf.is_tenting_top;
+    arc.is_tenting_bottom = pf.is_tenting_bottom;
+    arc.is_keepout = pf.is_keepout;
+    Ok(Some(arc))
+}
+
+fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
+    let designator = br.read_pascal_string_block()?;
+    let reserved_block_after_designator = br.read_block()?;
+    let net_string_block = br.read_pascal_string_block()?;
+    let reserved_block_after_net_string = br.read_block()?;
+
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, component_index) =
+        (cp.layer, cp.flags, cp.net_index, cp.component_index);
+
+    let location = read_coord_point(br)?;
+    let size_top = read_coord_point(br)?;
+    let size_middle = read_coord_point(br)?;
+    let size_bottom = read_coord_point(br)?;
+    let hole_size = Coord::from_raw(br.read_i32()?);
+    let mut shape_top = br.read_u8()?;
+    let mut shape_middle = br.read_u8()?;
+    let mut shape_bottom = br.read_u8()?;
+    let rotation = br.read_f64()?;
+    let is_plated = br.read_u8()? != 0;
+
+    // Extended fields (offsets 61..114).
+    let block_size = u64::from(size);
+    let mut stack_mode = 0i32;
+    let mut power_plane_connect_style = 0u8;
+    let mut relief_air_gap = 0i32;
+    let mut relief_conductor_width = 0i32;
+    let mut relief_entries = 4i16;
+    let mut power_plane_clearance = 0i32;
+    let mut power_plane_relief_expansion = 0i32;
+    let mut paste_mask_expansion = 0i32;
+    let mut solder_mask_expansion = 0i32;
+    let mut drill_type = 0u8;
+    let mut jumper_id = 0i16;
+
+    if block_size - (br.position()? - start) >= 25 {
+        br.skip(1)?; // offset 61
+        stack_mode = i32::from(br.read_u8()?);
+        power_plane_connect_style = br.read_u8()?;
+        relief_air_gap = br.read_i32()?;
+        relief_conductor_width = br.read_i32()?;
+        relief_entries = br.read_i16()?;
+        power_plane_clearance = br.read_i32()?;
+        power_plane_relief_expansion = br.read_i32()?;
+        br.skip(4)?;
+    }
+    if block_size - (br.position()? - start) >= 8 {
+        paste_mask_expansion = br.read_i32()?;
+        solder_mask_expansion = br.read_i32()?;
+    }
+    if block_size - (br.position()? - start) >= 16 {
+        br.skip(9)?;
+        drill_type = br.read_u8()?;
+        br.skip(6)?;
+    }
+    if block_size - (br.position()? - start) >= 4 {
+        jumper_id = br.read_i16()?;
+        br.skip(2)?;
+    }
+    let r = block_size - (br.position()? - start);
+    if r > 0 {
+        br.skip(r)?;
+    }
+
+    // 596-byte size/shape block.
+    let (_flags_byte_ss, ss_size) = br.read_block_header()?;
+    let ss_size = u64::from(ss_size);
+    let has_size_shape_block = ss_size > 0;
+
+    let mut layer_x_sizes = [0i32; 29];
+    let mut layer_y_sizes = [0i32; 29];
+    let mut internal_layer_shapes = [0u8; 29];
+    let mut hole_shape_byte = 0u8;
+    let mut hole_slot_length = 0i32;
+    let mut hole_rotation = 0f64;
+    let mut offset_x = [0i32; 32];
+    let mut offset_y = [0i32; 32];
+    let mut has_rounded_rect_byte = 0u8;
+    let mut per_layer_shapes = [0u8; 32];
+    let mut per_layer_corner_radii = [0u8; 32];
+
+    if ss_size >= 596 {
+        let ss_start = br.position()?;
+        for slot in &mut layer_x_sizes {
+            *slot = br.read_i32()?;
+        }
+        for slot in &mut layer_y_sizes {
+            *slot = br.read_i32()?;
+        }
+        for slot in &mut internal_layer_shapes {
+            *slot = br.read_u8()?;
+        }
+        br.skip(1)?;
+        hole_shape_byte = br.read_u8()?;
+        hole_slot_length = br.read_i32()?;
+        hole_rotation = br.read_f64()?;
+        for slot in &mut offset_x {
+            *slot = br.read_i32()?;
+        }
+        for slot in &mut offset_y {
+            *slot = br.read_i32()?;
+        }
+        has_rounded_rect_byte = br.read_u8()?;
+        for slot in &mut per_layer_shapes {
+            *slot = br.read_u8()?;
+        }
+        for slot in &mut per_layer_corner_radii {
+            *slot = br.read_u8()?;
+        }
+        let consumed = br.position()? - ss_start;
+        if ss_size > consumed {
+            br.skip(ss_size - consumed)?;
+        }
+    } else if ss_size > 0 {
+        br.skip(ss_size)?;
+    }
+
+    if has_rounded_rect_byte != 0 {
+        shape_top = per_layer_shapes[0];
+        shape_middle = per_layer_shapes[1];
+        shape_bottom = if stack_mode == 0 {
+            shape_top
+        } else {
+            per_layer_shapes[31]
+        };
+    }
+
+    let mut pad = Pad::default();
+    pad.designator = if designator.is_empty() {
+        None
+    } else {
+        Some(designator)
+    };
+    pad.location = location;
+    pad.size_top = size_top;
+    pad.size_middle = size_middle;
+    pad.size_bottom = size_bottom;
+    pad.hole_size = hole_size;
+    pad.shape_top = PadShape::try_from(i32::from(shape_top)).unwrap_or(PadShape::Round);
+    pad.shape_middle = PadShape::try_from(i32::from(shape_middle)).unwrap_or(PadShape::Round);
+    pad.shape_bottom = PadShape::try_from(i32::from(shape_bottom)).unwrap_or(PadShape::Round);
+    pad.rotation = rotation;
+    pad.is_plated = is_plated;
+    pad.layer = i32::from(layer);
+    pad.component_index = component_index;
+    pad.mode = stack_mode;
+    pad.power_plane_connect_style = i32::from(power_plane_connect_style);
+    pad.relief_air_gap = Coord::from_raw(relief_air_gap);
+    pad.relief_conductor_width = Coord::from_raw(relief_conductor_width);
+    pad.relief_entries = i32::from(relief_entries);
+    pad.power_plane_clearance = Coord::from_raw(power_plane_clearance);
+    pad.power_plane_relief_expansion = Coord::from_raw(power_plane_relief_expansion);
+    pad.paste_mask_expansion = Coord::from_raw(paste_mask_expansion);
+    pad.solder_mask_expansion = Coord::from_raw(solder_mask_expansion);
+    pad.drill_type = i32::from(drill_type);
+    pad.jumper_id = i32::from(jumper_id);
+    pad.layer_x_sizes = layer_x_sizes;
+    pad.layer_y_sizes = layer_y_sizes;
+    pad.internal_layer_shapes = internal_layer_shapes;
+    pad.hole_type = PadHoleType::try_from(i32::from(hole_shape_byte)).unwrap_or(PadHoleType::Round);
+    pad.hole_slot_length = hole_slot_length;
+    pad.hole_rotation = hole_rotation;
+    pad.offset_x_from_hole_center = offset_x;
+    pad.offset_y_from_hole_center = offset_y;
+    pad.has_rounded_rect_byte = has_rounded_rect_byte;
+    pad.per_layer_shapes = per_layer_shapes;
+    pad.per_layer_corner_radii = per_layer_corner_radii;
+    pad.has_size_shape_block = has_size_shape_block;
+    pad.reserved_block_after_designator = reserved_block_after_designator;
+    pad.reserved_block_after_net_string = reserved_block_after_net_string;
+    pad.net_string_block = net_string_block;
+
+    pad.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
+
+    let pf = PrimitiveFlags::decode(flags_bits);
+    pad.is_locked = pf.is_locked;
+    pad.is_tenting_top = pf.is_tenting_top;
+    pad.is_tenting_bottom = pf.is_tenting_bottom;
+    pad.is_keepout = pf.is_keepout;
+
+    Ok(Some(pad))
+}
+
+fn read_via<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Via>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let location = read_coord_point(br)?;
+    let diameter = Coord::from_raw(br.read_i32()?);
+    let hole_size = Coord::from_raw(br.read_i32()?);
+    let from_layer = br.read_u8()?;
+    let to_layer = br.read_u8()?;
+
+    let mut via = Via {
+        location,
+        diameter,
+        hole_size,
+        start_layer: i32::from(from_layer),
+        end_layer: i32::from(to_layer),
+        layer: i32::from(layer),
+        net_index: if net_idx >= 0 { net_idx as u16 } else { 0 },
+        component_index: ci,
+        ..Via::default()
+    };
+    let pf = PrimitiveFlags::decode(flags_bits);
+    via.is_locked = pf.is_locked;
+    via.is_tenting_top = pf.is_tenting_top;
+    via.is_tenting_bottom = pf.is_tenting_bottom;
+    via.is_keepout = pf.is_keepout;
+
+    let consumed = br.position()? - start;
+    let block_size = u64::from(size);
+    if consumed < block_size {
+        br.skip(1)?;
+        via.thermal_relief_air_gap = Coord::from_raw(br.read_i32()?);
+        via.thermal_relief_conductors = i32::from(br.read_u8()?);
+        br.skip(1)?;
+        via.thermal_relief_conductors_width = Coord::from_raw(br.read_i32()?);
+        via.power_plane_clearance = Coord::from_raw(br.read_i32()?);
+        via.power_plane_relief_expansion = Coord::from_raw(br.read_i32()?);
+        br.skip(4)?;
+        via.solder_mask_expansion = Coord::from_raw(br.read_i32()?);
+
+        // Capture the 8 reserved bytes Altium emits as [0,0,0,1,1,1,1,0]
+        // so non-canonical files round-trip exactly.
+        br.read_exact(&mut via.reserved_block_8)?;
+        let solder_mask_manual = br.read_u8()?;
+        via.solder_mask_expansion_manual = solder_mask_manual == 2;
+        via.reserved_byte_after_mask_flag = br.read_u8()?;
+        br.skip(2)?;
+        br.skip(4)?;
+        via.mode = i32::from(br.read_u8()?);
+        for slot in &mut via.diameters {
+            *slot = Coord::from_raw(br.read_i32()?);
+        }
+        via.trailing_reserved_i16 = br.read_i16()?;
+        via.trailing_reserved_i32 = br.read_i32()?;
+
+        let consumed = br.position()? - start;
+        if block_size > consumed {
+            br.skip(block_size - consumed)?;
+        }
+    }
+
+    Ok(Some(via))
+}
+
+fn read_track<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Track>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let start_x = br.read_i32()?;
+    let start_y = br.read_i32()?;
+    let end_x = br.read_i32()?;
+    let end_y = br.read_i32()?;
+    let width = Coord::from_raw(br.read_i32()?);
+
+    let mut subnet_index = 0u16;
+    let mut component_index = 0u8;
+    let block_size = u64::from(size);
+    let consumed = br.position()? - start;
+    if consumed + 3 <= block_size {
+        subnet_index = br.read_u16()?;
+        component_index = br.read_u8()?;
+    }
+    let consumed = br.position()? - start;
+    if block_size > consumed {
+        br.skip(block_size - consumed)?;
+    }
+
+    // Prefer the post-core sub-net index when present; otherwise fall back to
+    // the common-prefix net index. Either is the binary "no net" sentinel
+    // 0xFFFF if absent.
+    let net_index = if subnet_index != 0 && subnet_index != 0xFFFF {
+        subnet_index
+    } else if net_idx >= 0 {
+        net_idx as u16
+    } else {
+        0
+    };
+
+    let mut track = Track {
+        start: CoordPoint::new(Coord::from_raw(start_x), Coord::from_raw(start_y)),
+        end: CoordPoint::new(Coord::from_raw(end_x), Coord::from_raw(end_y)),
+        width,
+        layer: i32::from(layer),
+        net_index,
+        component_index,
+        ..Track::default()
+    };
+    let pf = PrimitiveFlags::decode(flags_bits);
+    track.is_locked = pf.is_locked;
+    track.is_tenting_top = pf.is_tenting_top;
+    track.is_tenting_bottom = pf.is_tenting_bottom;
+    track.is_keepout = pf.is_keepout;
+    Ok(Some(track))
+}
+
+fn read_text<R: Read + Seek>(
+    br: &mut BinaryReader<R>,
+    wide_strings: &[String],
+) -> Result<Option<Text>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+
+    let corner1 = read_coord_point(br)?;
+    let height = br.read_i32()?;
+    let stroke_font = br.read_i16()?;
+    let rotation = br.read_f64()?;
+    let mirrored = br.read_u8()? != 0;
+    let stroke_width = br.read_i32()?;
+
+    let mut text_kind = PcbTextKind::Stroke;
+    let mut font_bold = false;
+    let mut font_italic = false;
+    let mut font_name: Option<String> = None;
+    let mut barcode_lr_margin = 0i32;
+    let mut barcode_tb_margin = 0i32;
+    let mut font_inverted = false;
+    let mut font_inverted_border = 0i32;
+    let mut wide_string_index = -1i32;
+    let mut font_inverted_rect = false;
+    let mut font_inverted_rect_width = 0i32;
+    let mut font_inverted_rect_height = 0i32;
+    let mut font_inverted_rect_justification = 0u8;
+    let mut font_inverted_rect_text_offset = 0i32;
+
+    let block_size = u64::from(size);
+    if block_size >= 123 {
+        br.read_i16()?; // ext1
+        br.read_u8()?; // ext2
+        text_kind = PcbTextKind::try_from(i32::from(br.read_u8()?)).unwrap_or(PcbTextKind::Stroke);
+        font_bold = br.read_u8()? != 0;
+        font_italic = br.read_u8()? != 0;
+        font_name = Some(br.read_font_name()?);
+        barcode_lr_margin = br.read_i32()?;
+        barcode_tb_margin = br.read_i32()?;
+        br.skip(4)?; // ext3
+        br.skip(4)?; // ext4
+        br.read_u8()?;
+        br.read_u8()?;
+        br.skip(4)?;
+        br.skip(2)?;
+        br.skip(4)?;
+        br.skip(4)?;
+        font_inverted = br.read_u8()? != 0;
+        font_inverted_border = br.read_i32()?;
+        wide_string_index = br.read_i32()?;
+        br.skip(4)?;
+        font_inverted_rect = br.read_u8()? != 0;
+        font_inverted_rect_width = br.read_i32()?;
+        font_inverted_rect_height = br.read_i32()?;
+        font_inverted_rect_justification = br.read_u8()?;
+        font_inverted_rect_text_offset = br.read_i32()?;
+    }
+
+    let consumed = br.position()? - start;
+    if block_size > consumed {
+        br.skip(block_size - consumed)?;
+    }
+
+    let ascii_text = br.read_pascal_string_block()?;
+    let text_value = if (0..wide_strings.len() as i32).contains(&wide_string_index) {
+        wide_strings[wide_string_index as usize].clone()
+    } else {
+        ascii_text
+    };
+    if text_value.is_empty() {
+        return Ok(None);
+    }
+
+    let mut text = Text {
+        text: text_value,
+        location: corner1,
+        height: Coord::from_raw(height),
+        stroke_width: Coord::from_raw(stroke_width),
+        rotation,
+        layer: i32::from(layer),
+        net_index: if net_idx >= 0 { net_idx as u16 } else { 0 },
+        component_index: ci,
+        is_mirrored: mirrored,
+        ..Text::default()
+    };
+    text.stroke_font =
+        PcbStrokeFont::try_from(i32::from(stroke_font)).unwrap_or(PcbStrokeFont::Default);
+    text.text_kind = text_kind;
+    text.is_truetype = matches!(text_kind, PcbTextKind::TrueType);
+    text.font_bold = font_bold;
+    text.font_italic = font_italic;
+    text.font_name = font_name;
+    text.is_inverted = font_inverted;
+    text.inverted_border = Coord::from_raw(font_inverted_border);
+    text.use_inverted_rectangle = font_inverted_rect;
+    text.inverted_rect_width = Coord::from_raw(font_inverted_rect_width);
+    text.inverted_rect_height = Coord::from_raw(font_inverted_rect_height);
+    text.inverted_rect_justification =
+        TextJustification::try_from(i32::from(font_inverted_rect_justification))
+            .unwrap_or(TextJustification::BottomLeft);
+    text.inverted_rect_text_offset = Coord::from_raw(font_inverted_rect_text_offset);
+    text.barcode_lr_margin = Coord::from_raw(barcode_lr_margin);
+    text.barcode_tb_margin = Coord::from_raw(barcode_tb_margin);
+    text.wide_string_index = wide_string_index;
+
+    let pf = PrimitiveFlags::decode(flags_bits);
+    text.is_locked = pf.is_locked;
+    text.is_tenting_top = pf.is_tenting_top;
+    text.is_tenting_bottom = pf.is_tenting_bottom;
+    text.is_keepout = pf.is_keepout;
+    Ok(Some(text))
+}
+
+fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let corner1 = read_coord_point(br)?;
+    let corner2 = read_coord_point(br)?;
+    let rotation = br.read_f64()?;
+
+    let consumed = br.position()? - start;
+    let block_size = u64::from(size);
+    if block_size > consumed {
+        br.skip(block_size - consumed)?;
+    }
+
+    let mut fill = Fill {
+        corner1,
+        corner2,
+        layer: i32::from(layer),
+        rotation,
+        ..Fill::default()
+    };
+    fill.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
+    let pf = PrimitiveFlags::decode(flags_bits);
+    fill.is_locked = pf.is_locked;
+    fill.is_tenting_top = pf.is_tenting_top;
+    fill.is_tenting_bottom = pf.is_tenting_bottom;
+    fill.is_keepout = pf.is_keepout;
+    Ok(Some(fill))
+}
+
+fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    br.skip(4)?; // reserved u32
+    br.skip(1)?; // reserved u8
+
+    let parameters = read_param_map(br)?;
+    let vertex_count = br.read_u32()?;
+
+    let mut region = Region::default();
+    region.layer = i32::from(layer);
+    region.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
+    region.component_index = ci;
+    region.kind = parameters.get_i32("KIND").unwrap_or(0);
+    for _ in 0..vertex_count {
+        let x = Coord::from_raw(br.read_f64()? as i32);
+        let y = Coord::from_raw(br.read_f64()? as i32);
+        region.outline.push(CoordPoint::new(x, y));
+    }
+
+    let consumed = br.position()? - start;
+    let block_size = u64::from(size);
+    if block_size > consumed {
+        br.skip(block_size - consumed)?;
+    }
+
+    if let Some(v) = parameters.get("NET") {
+        region.net = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get("UNIQUEID") {
+        region.unique_id = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get("NAME") {
+        region.name = Some(v.to_string());
+    }
+
+    let pf = PrimitiveFlags::decode(flags_bits);
+    region.is_locked = pf.is_locked;
+    region.is_tenting_top = pf.is_tenting_top;
+    region.is_tenting_bottom = pf.is_tenting_bottom;
+    region.is_keepout = pf.is_keepout;
+
+    let extra = extract_remaining_parameters(&parameters, &["KIND", "NET", "UNIQUEID", "NAME"]);
+    if !extra.is_empty() {
+        region.additional_parameters = Some(extra);
+    }
+    Ok(Some(region))
+}
+
+fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<ComponentBody>> {
+    let (_flags_byte, size) = br.read_block_header()?;
+    if size == 0 {
+        return Ok(None);
+    }
+    let start = br.position()?;
+    let cp = read_common_prefix(br)?;
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    br.skip(4)?;
+    br.skip(1)?;
+
+    let parameters = read_param_map(br)?;
+    let vertex_count = br.read_u32()?;
+
+    let mut body = ComponentBody::default();
+    body.layer = i32::from(layer);
+    body.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
+    body.component_index = ci;
+    for _ in 0..vertex_count {
+        let x = Coord::from_raw(br.read_f64()? as i32);
+        let y = Coord::from_raw(br.read_f64()? as i32);
+        body.outline.push(CoordPoint::new(x, y));
+    }
+
+    let consumed = br.position()? - start;
+    let block_size = u64::from(size);
+    if block_size > consumed {
+        br.skip(block_size - consumed)?;
+    }
+
+    if let Some(v) = parameters.get("V7_LAYER") {
+        body.layer_name = v.to_string();
+    }
+    if let Some(v) = parameters.get("NAME") {
+        body.name = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get_i32("KIND") {
+        body.kind = v;
+    }
+    if let Some(v) = parameters.get_i32("SUBPOLYINDEX") {
+        body.sub_poly_index = v;
+    }
+    if let Some(v) = parameters.get_i32("UNIONINDEX") {
+        body.union_index = v;
+    }
+    if let Some(v) = parameters.get_f64("ARCRESOLUTION") {
+        body.arc_resolution = v;
+    }
+    if let Some(v) = parameters.get("ISSHAPEBASED") {
+        body.is_shape_based = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get_i32("CAVITYHEIGHT") {
+        body.cavity_height = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("STANDOFFHEIGHT") {
+        body.standoff_height = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("OVERALLHEIGHT") {
+        body.overall_height = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("BODYCOLOR3D") {
+        body.body_color_3d = v;
+    }
+    if let Some(v) = parameters.get_f64("BODYOPACITY3D") {
+        body.body_opacity_3d = v;
+    }
+    if let Some(v) = parameters.get("MODELID") {
+        body.model_id = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get("MODEL.EMBED") {
+        body.model_embed = v.eq_ignore_ascii_case("TRUE");
+    }
+    let m2dx = parameters.get_i32("MODEL.2D.X").unwrap_or(0);
+    let m2dy = parameters.get_i32("MODEL.2D.Y").unwrap_or(0);
+    if parameters.contains_key("MODEL.2D.X") || parameters.contains_key("MODEL.2D.Y") {
+        body.model_2d_location = CoordPoint::new(Coord::from_raw(m2dx), Coord::from_raw(m2dy));
+    }
+    if let Some(v) = parameters.get_f64("MODEL.2D.ROTATION") {
+        body.model_2d_rotation = v;
+    }
+    if let Some(v) = parameters.get_f64("MODEL.3D.ROTX") {
+        body.model_3d_rot_x = v;
+    }
+    if let Some(v) = parameters.get_f64("MODEL.3D.ROTY") {
+        body.model_3d_rot_y = v;
+    }
+    if let Some(v) = parameters.get_f64("MODEL.3D.ROTZ") {
+        body.model_3d_rot_z = v;
+    }
+    if let Some(v) = parameters.get_i32("MODEL.3D.DZ") {
+        body.model_3d_dz = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("MODEL.CHECKSUM") {
+        body.model_checksum = v;
+    }
+    if let Some(v) = parameters.get("MODEL.NAME") {
+        body.model_name = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get_i32("MODEL.MODELTYPE") {
+        body.model_type = v;
+    }
+    if let Some(v) = parameters.get("MODEL.MODELSOURCE") {
+        body.model_source = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get_i32("BODYPROJECTION") {
+        body.body_projection = v;
+    }
+    if let Some(v) = parameters.get("IDENTIFIER") {
+        body.identifier = Some(v.to_string());
+    }
+    if let Some(v) = parameters.get("TEXTURE") {
+        body.texture = Some(v.to_string());
+    }
+
+    let pf = PrimitiveFlags::decode(flags_bits);
+    body.is_locked = pf.is_locked;
+    body.is_tenting_top = pf.is_tenting_top;
+    body.is_tenting_bottom = pf.is_tenting_bottom;
+    body.is_keepout = pf.is_keepout;
+
+    let consumed_keys = [
+        "V7_LAYER",
+        "NAME",
+        "KIND",
+        "SUBPOLYINDEX",
+        "UNIONINDEX",
+        "ARCRESOLUTION",
+        "ISSHAPEBASED",
+        "CAVITYHEIGHT",
+        "STANDOFFHEIGHT",
+        "OVERALLHEIGHT",
+        "BODYCOLOR3D",
+        "BODYOPACITY3D",
+        "BODYPROJECTION",
+        "MODELID",
+        "MODEL.EMBED",
+        "MODEL.2D.X",
+        "MODEL.2D.Y",
+        "MODEL.2D.ROTATION",
+        "MODEL.3D.ROTX",
+        "MODEL.3D.ROTY",
+        "MODEL.3D.ROTZ",
+        "MODEL.3D.DZ",
+        "MODEL.CHECKSUM",
+        "MODEL.NAME",
+        "MODEL.MODELTYPE",
+        "MODEL.MODELSOURCE",
+        "IDENTIFIER",
+        "TEXTURE",
+    ];
+    let extra = extract_remaining_parameters(&parameters, &consumed_keys);
+    if !extra.is_empty() {
+        body.additional_parameters = Some(extra);
+    }
+
+    Ok(Some(body))
+}
+
+// Document reader (PcbDoc)
+
+use super::document::Document;
+
+const PCB_DOC_KNOWN_STORAGES: &[&str] = &[
+    "FileHeader",
+    "Board6",
+    "Nets6",
+    "Arcs6",
+    "Pads6",
+    "Vias6",
+    "Tracks6",
+    "Texts6",
+    "Fills6",
+    "Regions6",
+    "ComponentBodies6",
+    "Polygons6",
+    "Components6",
+    "WideStrings6",
+    "EmbeddedBoards6",
+    "Rules6",
+    "Classes6",
+    "DifferentialPairs6",
+    "Rooms6",
+];
+
+impl Document {
+    /// Parse a `.PcbDoc` file from an in-memory buffer.
+    pub fn from_bytes(bytes: Vec<u8>) -> Result<Self> {
+        let mut cf = CompoundFile::open(bytes)?;
+        let mut document = Self::default();
+        let mut diagnostics = Vec::new();
+
+        let wide_strings = read_doc_wide_strings(&mut cf)?;
+        read_board(&mut cf, &mut document)?;
+        read_nets(&mut cf, &mut document)?;
+        read_components(&mut cf, &mut document)?;
+        read_doc_primitive_streams(&mut cf, &mut document, &wide_strings, &mut diagnostics)?;
+        read_polygons(&mut cf, &mut document)?;
+        read_rules(&mut cf, &mut document)?;
+        read_classes(&mut cf, &mut document)?;
+        read_differential_pairs(&mut cf, &mut document)?;
+        read_rooms(&mut cf, &mut document)?;
+        read_embedded_boards(&mut cf, &mut document)?;
+        resolve_net_names(&mut document);
+        assign_pads_to_components(&mut document);
+        read_doc_additional_streams(&mut cf, &mut document, &mut diagnostics)?;
+
+        document.diagnostics = diagnostics;
+        Ok(document)
+    }
+
+    /// Read a `.PcbDoc` from disk.
+    pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
+        let bytes = tokio::fs::read(path).await?;
+        Self::from_bytes(bytes)
+    }
+
+    /// Read a `.PcbDoc` from any `AsyncRead`.
+    pub async fn read_async<R>(mut reader: R) -> Result<Self>
+    where
+        R: AsyncRead + Unpin,
+    {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        Self::from_bytes(bytes)
+    }
+}
+
+fn read_doc_wide_strings(cf: &mut CompoundFile) -> Result<Vec<String>> {
+    let Some(data) = cf.try_read_stream("WideStrings6/Data")? else {
+        return Ok(Vec::new());
+    };
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+    let map = read_param_map(&mut br)?;
+    let mut out = Vec::new();
+    for i in 0.. {
+        let key = format!("ENCODEDTEXT{i}");
+        let Some(encoded) = map.get(&key) else {
+            break;
+        };
+        out.push(decode_wide_string(encoded));
+    }
+    Ok(out)
+}
+
+fn read_board(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let Some(data) = cf.try_read_stream("Board6/Data")? else {
+        return Ok(());
+    };
+    if data.is_empty() {
+        return Ok(());
+    }
+    let mut br = BinaryReader::new(Cursor::new(data))?;
+    let params = read_param_map(&mut br)?;
+    let mut typed = BTreeMap::new();
+    for (name, value, _) in params.iter() {
+        typed.insert(name.to_string(), value.to_string());
+    }
+    document.board_parameters = Some(typed);
+    Ok(())
+}
+
+fn read_doc_primitive_streams(
+    cf: &mut CompoundFile,
+    document: &mut Document,
+    wide_strings: &[String],
+    _diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    if let Some(data) = cf.try_read_stream("Arcs6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Arc as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(arc) = read_arc(&mut br)? {
+                document.arcs.push(arc);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Pads6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Pad as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(pad) = read_pad(&mut br)? {
+                document.pads.push(pad);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Vias6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Via as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(via) = read_via(&mut br)? {
+                document.vias.push(via);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Tracks6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Track as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(track) = read_track(&mut br)? {
+                document.tracks.push(track);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Texts6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Text as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(text) = read_text(&mut br, wide_strings)? {
+                document.texts.push(text);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Fills6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Fill as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(fill) = read_fill(&mut br)? {
+                document.fills.push(fill);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("Regions6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::Region as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(region) = read_region(&mut br)? {
+                document.regions.push(region);
+            }
+        }
+    }
+
+    if let Some(data) = cf.try_read_stream("ComponentBodies6/Data")? {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        while br.has_more()? {
+            let id = br.read_u8()?;
+            if id != ObjectId::ComponentBody as u8 {
+                br.skip_block()?;
+                continue;
+            }
+            if let Some(body) = read_component_body(&mut br)? {
+                document.component_bodies.push(body);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Read each parameter-block in a `*6/Data` stream and pass it to a visitor.
+///
+/// `Rules6` (and a handful of other storages in some Altium versions) use a
+/// 6-byte per-record header (`[u16 flags][u32 size]`) instead of the standard
+/// 4-byte header. The reader autodetects the per-record header size by
+/// looking at the first few bytes; once chosen, it sticks with that layout
+/// for the whole stream.
+fn for_each_param_record(
+    cf: &mut CompoundFile,
+    storage: &str,
+    visit: impl FnMut(&ParameterMap) -> Result<()>,
+) -> Result<()> {
+    let path = format!("{storage}/Data");
+    let Some(data) = cf.try_read_stream(&path)? else {
+        return Ok(());
+    };
+    if data.is_empty() {
+        return Ok(());
+    }
+    let prefix = detect_record_prefix(&data);
+    parse_param_records(&data, prefix, visit)
+}
+
+/// Returns the per-record header padding (`0` for normal blocks, `2` when each
+/// record carries a 2-byte version word in front of its size header).
+fn detect_record_prefix(data: &[u8]) -> usize {
+    fn block_size(buf: &[u8], offset: usize) -> Option<u32> {
+        if offset + 4 > buf.len() {
+            return None;
+        }
+        let raw = u32::from_le_bytes([
+            buf[offset],
+            buf[offset + 1],
+            buf[offset + 2],
+            buf[offset + 3],
+        ]);
+        Some(raw & 0x00FF_FFFF)
+    }
+    // A reasonable parameter block is < 1 MiB; anything larger is almost
+    // certainly a misaligned read.
+    const MAX_REASONABLE: u32 = 1 << 20;
+    if let Some(size) = block_size(data, 0) {
+        if size > 0 && size < MAX_REASONABLE && (4 + size as usize) <= data.len() {
+            return 0;
+        }
+    }
+    if let Some(size) = block_size(data, 2) {
+        if size > 0 && size < MAX_REASONABLE && (6 + size as usize) <= data.len() {
+            return 2;
+        }
+    }
+    0
+}
+
+fn parse_param_records(
+    data: &[u8],
+    prefix: usize,
+    mut visit: impl FnMut(&ParameterMap) -> Result<()>,
+) -> Result<()> {
+    let mut pos = 0usize;
+    while pos + prefix + 4 <= data.len() {
+        pos += prefix;
+        let size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
+            & 0x00FF_FFFF;
+        pos += 4;
+        if size == 0 {
+            continue;
+        }
+        let end = pos + size as usize;
+        if end > data.len() {
+            return Ok(()); // Truncated — accept what we have.
+        }
+        let body = &data[pos..end];
+        let null = body.iter().position(|&b| b == 0).unwrap_or(body.len());
+        let raw = crate::encoding::decode(&body[..null]);
+        pos = end;
+        if raw.is_empty() {
+            continue;
+        }
+        let params = ParameterMap::parse(&raw);
+        if params.is_empty() {
+            continue;
+        }
+        visit(&params)?;
+    }
+    Ok(())
+}
+
+fn read_nets(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut nets = Vec::new();
+    for_each_param_record(cf, "Nets6", |params| {
+        nets.push(super::doc_codec::net_from_params(params));
+        Ok(())
+    })?;
+    document.nets = nets;
+    Ok(())
+}
+
+fn read_components(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut components = Vec::new();
+    for_each_param_record(cf, "Components6", |params| {
+        components.push(super::doc_codec::component_from_params(params));
+        Ok(())
+    })?;
+    document.components = components;
+    Ok(())
+}
+
+fn read_polygons(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut polygons = Vec::new();
+    for_each_param_record(cf, "Polygons6", |params| {
+        polygons.push(super::doc_codec::polygon_from_params(params));
+        Ok(())
+    })?;
+    document.polygons = polygons;
+    Ok(())
+}
+
+fn read_rules(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut rules = Vec::new();
+    for_each_param_record(cf, "Rules6", |params| {
+        rules.push(super::doc_codec::rule_from_params(params));
+        Ok(())
+    })?;
+    document.rules = rules;
+    Ok(())
+}
+
+fn read_classes(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut classes = Vec::new();
+    for_each_param_record(cf, "Classes6", |params| {
+        classes.push(super::doc_codec::object_class_from_params(params));
+        Ok(())
+    })?;
+    document.classes = classes;
+    Ok(())
+}
+
+fn read_differential_pairs(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut diff_pairs = Vec::new();
+    for_each_param_record(cf, "DifferentialPairs6", |params| {
+        diff_pairs.push(super::doc_codec::differential_pair_from_params(params));
+        Ok(())
+    })?;
+    document.differential_pairs = diff_pairs;
+    Ok(())
+}
+
+fn read_rooms(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut rooms = Vec::new();
+    for_each_param_record(cf, "Rooms6", |params| {
+        rooms.push(super::doc_codec::room_from_params(params));
+        Ok(())
+    })?;
+    document.rooms = rooms;
+    Ok(())
+}
+
+fn read_embedded_boards(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
+    let mut boards = Vec::new();
+    for_each_param_record(cf, "EmbeddedBoards6", |params| {
+        boards.push(super::doc_codec::embedded_board_from_params(params));
+        Ok(())
+    })?;
+    document.embedded_boards = boards;
+    Ok(())
+}
+
+/// Map binary `net_index` values back to net names from `Nets6`. Indices are
+/// 1-based on disk (`0xFFFF` / `0` mean "no net"); the names list is 0-based.
+fn resolve_net_names(document: &mut Document) {
+    if document.nets.is_empty() {
+        return;
+    }
+    let lookup = |idx: u16| -> Option<String> {
+        if idx == 0 {
+            return None;
+        }
+        document
+            .nets
+            .get((idx - 1) as usize)
+            .map(|n| n.name.clone())
+    };
+    for arc in &mut document.arcs {
+        if arc.net.is_none() {
+            arc.net = lookup(arc.net_index);
+        }
+    }
+    for pad in &mut document.pads {
+        if pad.net.is_none() {
+            pad.net = lookup(pad.net_index);
+        }
+    }
+    for track in &mut document.tracks {
+        if track.net.is_none() {
+            track.net = lookup(track.net_index);
+        }
+    }
+    for fill in &mut document.fills {
+        if fill.net.is_none() {
+            fill.net = lookup(fill.net_index);
+        }
+    }
+}
+
+/// Resolve the binary `component_index` byte read from each pad to its parent
+/// component, populating the component's owned pad list.
+fn assign_pads_to_components(document: &mut Document) {
+    if document.components.is_empty() || document.pads.is_empty() {
+        return;
+    }
+    let count = document.components.len() as i32;
+    for pad in &document.pads {
+        let idx = pad.component_index;
+        if (0..count).contains(&idx) {
+            document.components[idx as usize].pads.push(pad.clone());
+        }
+    }
+}
+
+fn read_doc_additional_streams(
+    cf: &mut CompoundFile,
+    document: &mut Document,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let mut additional: IndexMap<String, Vec<u8>> = IndexMap::new();
+    let known: Vec<String> = PCB_DOC_KNOWN_STORAGES
+        .iter()
+        .map(|s| s.to_ascii_uppercase())
+        .collect();
+
+    let entries = cf.list_children("/")?;
+    for entry in entries {
+        if known.contains(&entry.name.to_ascii_uppercase()) {
+            continue;
+        }
+        if entry.is_storage {
+            let inner = cf.list_children(&entry.name)?;
+            for sub in inner {
+                if sub.is_stream {
+                    match cf.read_stream(format!("{}/{}", entry.name, sub.name)) {
+                        Ok(data) => {
+                            additional.insert(format!("{}/{}", entry.name, sub.name), data);
+                        }
+                        Err(e) => {
+                            diagnostics.push(Diagnostic::warning(format!(
+                                "failed to read {}/{}: {e}",
+                                entry.name, sub.name
+                            )));
+                        }
+                    }
+                }
+            }
+        } else if entry.is_stream {
+            match cf.read_stream(&entry.name) {
+                Ok(data) => {
+                    additional.insert(entry.name, data);
+                }
+                Err(e) => {
+                    diagnostics.push(Diagnostic::warning(format!(
+                        "failed to read {}: {e}",
+                        entry.name
+                    )));
+                }
+            }
+        }
+    }
+
+    document.additional_streams = additional.into_iter().collect();
+    Ok(())
+}

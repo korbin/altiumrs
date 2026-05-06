@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/altium",
+    "crates/altium-derive",
+    "crates/altium-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/issus/altiumrs"
+rust-version = "1.85"
+
+[workspace.dependencies]
+altium = { path = "crates/altium", version = "0.1.0" }
+altium-derive = { path = "crates/altium-derive", version = "0.1.0" }
+
+cfb = "0.10"
+encoding_rs = "0.8"
+flate2 = "1"
+indexmap = { version = "2", features = ["serde"] }
+thiserror = "2"
+byteorder = "1.5"
+tokio = { version = "1", default-features = false }
+serde = { version = "1", features = ["derive"] }
+serde_repr = "0.1"
+serde_json = "1"
+
+# proc macro
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "extra-traits"] }
+
+# render
+tiny-skia = "0.11"
+cosmic-text = "0.12"
+fontdb = "0.21"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# dev
+pretty_assertions = "1"
+insta = { version = "1", features = ["json"] }
+criterion = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"

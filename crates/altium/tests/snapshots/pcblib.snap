@@ -1,0 +1,24 @@
+---
+source: crates/altium/tests/json_snapshots.rs
+expression: pcb_library_summary(&library)
+---
+{
+  "component_count": 1,
+  "components": [
+    {
+      "arcs": 1,
+      "bodies": 1,
+      "description": "WLCSP 56-Leads, Body 3.38x3.38mmx0.59mm, Pitch 0.20mm",
+      "fills": 0,
+      "name": "STM WLCSP-56 B0H4",
+      "pads": 56,
+      "regions": 0,
+      "texts": 0,
+      "tracks": 16,
+      "vias": 0
+    }
+  ],
+  "model_count": 1,
+  "section_key_count": 0,
+  "unique_id": "HYBRYRJJ"
+}

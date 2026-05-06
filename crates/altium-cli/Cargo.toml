@@ -1,0 +1,21 @@
+[package]
+name = "altium-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Command-line tools for inspecting and converting Altium Designer files"
+
+[[bin]]
+name = "altium"
+path = "src/main.rs"
+
+[dependencies]
+altium = { workspace = true, features = ["render", "serde"] }
+clap.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde_json.workspace = true

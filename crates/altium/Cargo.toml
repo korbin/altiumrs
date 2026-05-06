@@ -1,0 +1,35 @@
+[package]
+name = "altium"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Read and write Altium Designer files (.SchLib, .SchDoc, .PcbLib, .PcbDoc)"
+
+[features]
+default = []
+serde = ["dep:serde", "dep:serde_repr"]
+render = ["dep:tiny-skia", "dep:cosmic-text", "dep:fontdb"]
+
+[dependencies]
+altium-derive.workspace = true
+cfb.workspace = true
+encoding_rs.workspace = true
+flate2.workspace = true
+indexmap.workspace = true
+thiserror.workspace = true
+byteorder.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+serde = { workspace = true, optional = true }
+serde_repr = { workspace = true, optional = true }
+tiny-skia = { workspace = true, optional = true }
+cosmic-text = { workspace = true, optional = true }
+fontdb = { workspace = true, optional = true }
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+insta.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+criterion.workspace = true

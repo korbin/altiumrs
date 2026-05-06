@@ -1,0 +1,22 @@
+---
+source: crates/altium/tests/json_snapshots.rs
+expression: sch_document_summary(&document)
+---
+{
+  "additional_streams": 0,
+  "blankets": 0,
+  "bus_entries": 0,
+  "buses": 0,
+  "components": 9,
+  "has_header_params": true,
+  "junctions": 2,
+  "net_labels": 8,
+  "no_ercs": 8,
+  "parameter_sets": 0,
+  "parameters": 27,
+  "ports": 0,
+  "power_objects": 7,
+  "raw_records": 0,
+  "sheet_symbols": 4,
+  "wires": 16
+}

@@ -1,0 +1,24 @@
+---
+source: crates/altium/tests/json_snapshots.rs
+expression: pcb_document_summary(&document)
+---
+{
+  "arcs": 4,
+  "bodies": 0,
+  "classes": 15,
+  "components": 0,
+  "differential_pairs": 0,
+  "embedded_boards": 1,
+  "fills": 0,
+  "has_board_params": true,
+  "nets": 18,
+  "pads": 4,
+  "pads_assigned_to_components": 0,
+  "polygons": 0,
+  "regions": 0,
+  "rooms": 0,
+  "rules": 36,
+  "texts": 11,
+  "tracks": 10,
+  "vias": 0
+}
