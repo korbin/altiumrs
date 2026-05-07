@@ -48,6 +48,20 @@ enum Command {
         #[arg(short, long)]
         component: Option<String>,
     },
+    /// Recursively dereference every embedded sub-board of a `.PcbDoc` and
+    /// inline its primitives into a single self-contained output `.PcbDoc`.
+    /// Sub-boards are looked up next to the input file (and any extra
+    /// `--search-path` directories).
+    Flatten {
+        /// Source `.PcbDoc` carrying embedded board references.
+        path: PathBuf,
+        /// Destination `.PcbDoc`. Use `-` to print a summary without writing.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Extra directories to search for sub-board files. Repeatable.
+        #[arg(long)]
+        search_path: Vec<PathBuf>,
+    },
 }
 
 #[tokio::main]
@@ -71,6 +85,11 @@ async fn main() -> Result<()> {
             height,
         } => cmd_render(&path, &output, component.as_deref(), width, height).await,
         Command::Inspect { path, component } => cmd_inspect(&path, component.as_deref()).await,
+        Command::Flatten {
+            path,
+            output,
+            search_path,
+        } => cmd_flatten(&path, output.as_deref(), &search_path).await,
     }
 }
 
@@ -187,10 +206,19 @@ async fn cmd_render(
                     "PcbDoc renders the whole board; --component is not supported here"
                 ));
             }
+            // If the PcbDoc carries any embedded board references, wire up a
+            // FileBoardLoader rooted at the parent directory so siblings like
+            // `Power Adapter Panel.PcbDoc` → `USB Power Adapter.PcbDoc` get
+            // pulled in and rendered. Falls through to the placeholder
+            // renderer when the document doesn't reference any sub-boards.
+            let parent_dir = path.parent().unwrap_or(Path::new("."));
+            let loader = altium::pcb::FileBoardLoader::new(parent_dir);
             if svg_target {
-                tokio::fs::write(output, doc.render_svg(opts)).await?;
+                tokio::fs::write(output, doc.render_svg_with_loader(opts, &loader)).await?;
             } else {
-                let png = doc.render_png(opts).map_err(|e| anyhow!(e))?;
+                let png = doc
+                    .render_png_with_loader(opts, &loader)
+                    .map_err(|e| anyhow!(e))?;
                 tokio::fs::write(output, png).await?;
             }
         }
@@ -291,4 +319,98 @@ async fn cmd_inspect(path: &Path, component: Option<&str>) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
+}
+
+async fn cmd_flatten(
+    path: &Path,
+    output: Option<&Path>,
+    extra_search_paths: &[PathBuf],
+) -> Result<()> {
+    use altium::pcb::FileBoardLoader;
+
+    let parent_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // Reading via AltiumFile::read so unrecognised extensions error early
+    // with a structured message; only `.PcbDoc` makes sense for flattening.
+    let file = AltiumFile::read(path).await?;
+    let doc = match file {
+        AltiumFile::PcbDocument(d) => d,
+        other => {
+            return Err(anyhow!(
+                "flatten only supports .PcbDoc; got {}",
+                kind_label(&other)
+            ));
+        }
+    };
+    let original_embedded = doc.embedded_boards.len();
+
+    // FileBoardLoader resolves siblings against the parent directory plus
+    // any extra search paths the user supplied. Mirrors the auto-resolver
+    // the renderer uses.
+    let mut loader = FileBoardLoader::new(&parent_dir);
+    for extra in extra_search_paths {
+        loader = loader.with_search_path(extra);
+    }
+
+    let flat = doc.flatten_embedded_boards_with(&loader);
+
+    // Compact stats so the user can see what work the flatten did.
+    let resolved = original_embedded.saturating_sub(flat.embedded_boards.len());
+    eprintln!(
+        "flattened {resolved}/{original_embedded} embedded boards from {}",
+        path.display()
+    );
+    eprintln!(
+        "  pads={} tracks={} arcs={} vias={} texts={} fills={} regions={} bodies={} polygons={} components={}",
+        flat.pads.len(),
+        flat.tracks.len(),
+        flat.arcs.len(),
+        flat.vias.len(),
+        flat.texts.len(),
+        flat.fills.len(),
+        flat.regions.len(),
+        flat.component_bodies.len(),
+        flat.polygons.len(),
+        flat.components.len(),
+    );
+
+    // Surface diagnostics — these are the boards that *didn't* flatten
+    // (missing siblings, recursion cap, parse failure). Non-fatal.
+    if !flat.diagnostics.is_empty() {
+        eprintln!("diagnostics:");
+        for d in &flat.diagnostics {
+            eprintln!("  [{:?}] {}", d.severity, d.message);
+        }
+    }
+
+    // `-o -` (or equivalent) prints stats only and skips the write. Anything
+    // else writes a fresh `.PcbDoc` byte stream.
+    let Some(out_path) = output else {
+        return Ok(());
+    };
+    if out_path.as_os_str() == "-" {
+        return Ok(());
+    }
+
+    let bytes = flat
+        .to_bytes()
+        .with_context(|| format!("encode flattened {}", out_path.display()))?;
+    tokio::fs::write(out_path, bytes)
+        .await
+        .with_context(|| format!("write {}", out_path.display()))?;
+    println!("wrote {}", out_path.display());
+    Ok(())
+}
+
+fn kind_label(file: &AltiumFile) -> &'static str {
+    match file {
+        AltiumFile::PcbLibrary(_) => ".PcbLib",
+        AltiumFile::SchLibrary(_) => ".SchLib",
+        AltiumFile::PcbDocument(_) => ".PcbDoc",
+        AltiumFile::SchDocument(_) => ".SchDoc",
+    }
 }

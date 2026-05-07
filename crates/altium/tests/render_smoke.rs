@@ -341,3 +341,248 @@ fn layer_color_known_layers() {
     assert_eq!(overlay.g, 0xFF);
     assert_eq!(overlay.b, 0x00);
 }
+
+// ─── Embedded sub-board recursive rendering ───────────────────────────────
+
+use altium::pcb::{BoardLoader, EmbeddedBoard, FileBoardLoader};
+use altium::Result as AltiumResult;
+
+/// In-memory loader keyed by `document_path`. Lets render tests exercise the
+/// recursive path without touching the filesystem.
+struct InMemoryLoader {
+    map: std::collections::HashMap<String, Vec<u8>>,
+    calls: std::cell::Cell<usize>,
+}
+
+impl InMemoryLoader {
+    fn new() -> Self {
+        Self {
+            map: std::collections::HashMap::new(),
+            calls: std::cell::Cell::new(0),
+        }
+    }
+    fn insert(&mut self, path: &str, bytes: Vec<u8>) {
+        self.map.insert(path.to_string(), bytes);
+    }
+}
+
+impl BoardLoader for InMemoryLoader {
+    fn load(&self, document_path: &str) -> AltiumResult<Option<Vec<u8>>> {
+        self.calls.set(self.calls.get() + 1);
+        Ok(self.map.get(document_path).cloned())
+    }
+}
+
+fn build_marker_subdoc() -> pcb::Document {
+    // A sub-document with a single very-distinctive arc — easy to count in
+    // the resulting SVG.
+    let mut sub = pcb::Document::default();
+    let mut arc = pcb::Arc::default();
+    arc.center = CoordPoint::new(Coord::ZERO, Coord::ZERO);
+    arc.radius = Coord::from_mils(20.0);
+    arc.start_angle = 0.0;
+    arc.end_angle = 360.0;
+    arc.width = Coord::from_mils(5.0);
+    arc.layer = 33; // top overlay → yellow
+    arc.enabled = true;
+    sub.arcs.push(arc);
+    sub
+}
+
+#[test]
+fn embedded_board_renders_placeholder_without_loader() {
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Missing.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(0.0);
+    board.y1_location = Coord::from_mils(0.0);
+    board.x2_location = Coord::from_mils(200.0);
+    board.y2_location = Coord::from_mils(150.0);
+    board.col_count = 1;
+    board.row_count = 1;
+    parent.embedded_boards.push(board);
+
+    let svg = parent.render_svg(RenderOptions::default());
+    // The placeholder draws a labelled rectangle. Both should appear.
+    assert!(
+        svg.contains("Missing.PcbDoc"),
+        "placeholder label must include the unresolved DOCUMENTPATH; got:\n{svg}"
+    );
+    assert!(svg.contains("<rect"), "placeholder draws a rectangle");
+}
+
+#[test]
+fn embedded_board_renders_subdoc_through_loader() {
+    let sub = build_marker_subdoc();
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    let mut loader = InMemoryLoader::new();
+    loader.insert("Sub.PcbDoc", sub_bytes);
+
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Sub.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(0.0);
+    board.y1_location = Coord::from_mils(0.0);
+    board.x2_location = Coord::from_mils(100.0);
+    board.y2_location = Coord::from_mils(100.0);
+    board.col_count = 1;
+    board.row_count = 1;
+    parent.embedded_boards.push(board);
+
+    let opts = RenderOptions {
+        width: 600,
+        height: 600,
+        ..RenderOptions::default()
+    };
+    let svg = parent.render_svg_with_loader(opts, &loader);
+
+    // The sub-document had a circle (Arc with full sweep). The renderer emits
+    // <circle .../> for a full-sweep arc. So we should see one circle in the
+    // output, and no placeholder label.
+    assert!(
+        svg.contains("<circle"),
+        "sub-document arc should render as a circle; got:\n{svg}"
+    );
+    assert!(
+        !svg.contains("Sub.PcbDoc"),
+        "no placeholder label when sub-doc resolves; got:\n{svg}"
+    );
+    assert!(loader.calls.get() >= 1, "loader was consulted");
+}
+
+#[test]
+fn embedded_board_array_replicates_subdoc() {
+    // 2×3 array of a single-arc sub-document. We expect 6 circle elements in
+    // the SVG (one per array instance).
+    let sub = build_marker_subdoc();
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    let mut loader = InMemoryLoader::new();
+    loader.insert("Sub.PcbDoc", sub_bytes);
+
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Sub.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(0.0);
+    board.y1_location = Coord::from_mils(0.0);
+    board.x2_location = Coord::from_mils(50.0);
+    board.y2_location = Coord::from_mils(50.0);
+    board.col_count = 2;
+    board.row_count = 3;
+    board.col_spacing = Coord::from_mils(80.0);
+    board.row_spacing = Coord::from_mils(80.0);
+    parent.embedded_boards.push(board);
+
+    let opts = RenderOptions {
+        width: 800,
+        height: 800,
+        ..RenderOptions::default()
+    };
+    let svg = parent.render_svg_with_loader(opts, &loader);
+
+    let circle_count = svg.matches("<circle").count();
+    assert_eq!(
+        circle_count, 6,
+        "expected 6 sub-doc copies for 2×3 array, got {circle_count}"
+    );
+}
+
+#[test]
+fn embedded_board_falls_back_when_loader_returns_none() {
+    let loader = InMemoryLoader::new(); // empty — loads return None
+
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Ghost.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(0.0);
+    board.y1_location = Coord::from_mils(0.0);
+    board.x2_location = Coord::from_mils(100.0);
+    board.y2_location = Coord::from_mils(100.0);
+    board.col_count = 1;
+    board.row_count = 1;
+    parent.embedded_boards.push(board);
+
+    let svg = parent.render_svg_with_loader(RenderOptions::default(), &loader);
+
+    // Failure is rendered as a placeholder with the path label rather than
+    // silently dropping the reference.
+    assert!(svg.contains("Ghost.PcbDoc"), "missing-board label visible");
+}
+
+#[test]
+fn embedded_board_recursion_depth_caps_out() {
+    // A self-referencing sub-document. The recursion guard should stop after
+    // MAX_EMBEDDED_DEPTH levels; the test just checks rendering terminates and
+    // produces some output.
+    let mut sub = pcb::Document::default();
+    let mut self_ref = EmbeddedBoard::default();
+    self_ref.document_path = Some("Self.PcbDoc".into());
+    self_ref.layer = 1;
+    self_ref.x1_location = Coord::from_mils(0.0);
+    self_ref.y1_location = Coord::from_mils(0.0);
+    self_ref.x2_location = Coord::from_mils(50.0);
+    self_ref.y2_location = Coord::from_mils(50.0);
+    self_ref.col_count = 1;
+    self_ref.row_count = 1;
+    sub.embedded_boards.push(self_ref);
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    let mut loader = InMemoryLoader::new();
+    loader.insert("Self.PcbDoc", sub_bytes);
+
+    let mut parent = pcb::Document::default();
+    let mut top = EmbeddedBoard::default();
+    top.document_path = Some("Self.PcbDoc".into());
+    top.layer = 1;
+    top.x1_location = Coord::from_mils(0.0);
+    top.y1_location = Coord::from_mils(0.0);
+    top.x2_location = Coord::from_mils(200.0);
+    top.y2_location = Coord::from_mils(200.0);
+    top.col_count = 1;
+    top.row_count = 1;
+    parent.embedded_boards.push(top);
+
+    // No panic, no infinite loop, output non-empty.
+    let svg = parent.render_svg_with_loader(RenderOptions::default(), &loader);
+    assert!(!svg.is_empty());
+}
+
+#[test]
+fn embedded_board_resolves_file_loader_against_testdata_pair() {
+    let testdata = std::path::PathBuf::from("../../testdata");
+    if !testdata.exists() {
+        eprintln!("skipping: testdata not present");
+        return;
+    }
+    let parent_path = testdata.join("Power Adapter Panel.PcbDoc");
+    let sibling = testdata.join("USB Power Adapter.PcbDoc");
+    if !parent_path.exists() || !sibling.exists() {
+        eprintln!("skipping: testdata pair not present");
+        return;
+    }
+
+    let parent_bytes = std::fs::read(&parent_path).unwrap();
+    let parent = pcb::Document::from_bytes(parent_bytes).expect("parse parent");
+    let loader = FileBoardLoader::new(testdata);
+
+    let svg = parent.render_svg_with_loader(RenderOptions::default(), &loader);
+    assert!(svg.starts_with("<?xml") || svg.starts_with("<svg"));
+    // 12 instances (3×4 array) × at least one drawable primitive per instance.
+    // A SVG with no embedded sub-render would have far fewer paths than one
+    // with the sub-board replicated 12×; sanity-check on element count.
+    let primitive_count = svg.matches("<rect").count()
+        + svg.matches("<line").count()
+        + svg.matches("<path").count()
+        + svg.matches("<circle").count()
+        + svg.matches("<polyline").count()
+        + svg.matches("<polygon").count();
+    assert!(
+        primitive_count > 50,
+        "expected many primitives from 3×4 sub-board replication, got {primitive_count}"
+    );
+}

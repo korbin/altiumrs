@@ -7,9 +7,16 @@ use super::layer_colors;
 use super::svg::SvgContext;
 use super::transform::CoordTransform;
 use crate::color::Color;
+use crate::coord::{Coord, CoordPoint, CoordRect};
 use crate::enums::PadShape;
+use crate::pcb::embedded::{BoardLoader, EmbeddedBoard};
 use crate::pcb::primitives::{Arc, ComponentBody, Fill, Pad, Region, Text, Track, Via};
 use crate::pcb::{Component, Document, binary as pcb_binary};
+
+/// Maximum embedded-board recursion depth. Past this we draw a placeholder
+/// instead of resolving, which prevents infinite loops if a sub-board ever
+/// references its own ancestor.
+const MAX_EMBEDDED_DEPTH: u8 = 8;
 
 fn layer_color(layer: i32) -> Color {
     layer_colors::color_for(layer)
@@ -458,11 +465,160 @@ pub fn render_component<C: RenderContext>(ctx: &mut C, component: &Component, t:
 }
 
 pub fn render_document<C: RenderContext>(ctx: &mut C, document: &Document, t: &CoordTransform) {
+    render_document_inner(ctx, document, t, None, 0);
+}
+
+/// Render with embedded sub-boards resolved through `loader`. Each
+/// `EmbeddedBoard` reference is dereferenced (recursively, depth-limited) and
+/// drawn in place, including array replication via
+/// `col_count`/`row_count`/`col_spacing`/`row_spacing` and any
+/// `rotation`/`mirror_flag`. References that fail to resolve fall back to a
+/// labelled placeholder rectangle.
+pub fn render_document_with_loader<C: RenderContext>(
+    ctx: &mut C,
+    document: &Document,
+    t: &CoordTransform,
+    loader: &dyn BoardLoader,
+) {
+    render_document_inner(ctx, document, t, Some(loader), 0);
+}
+
+fn render_document_inner<C: RenderContext>(
+    ctx: &mut C,
+    document: &Document,
+    t: &CoordTransform,
+    loader: Option<&dyn BoardLoader>,
+    depth: u8,
+) {
+    // Parent primitives first, sorted by Altium layer-stack draw priority.
     let mut prims = Vec::new();
     collect_document(document, &mut prims);
     prims.sort_by_key(|p| p.priority_key());
     for p in &prims {
         p.draw(ctx, t);
+    }
+
+    // Then each embedded board on top — either as a recursive sub-render or a
+    // placeholder. Using a fixed parent-then-child order assumes the stack-up
+    // matches across the boundary; with mixed stack-ups you'd want to merge
+    // and re-sort priorities, which we deliberately don't do.
+    for board in &document.embedded_boards {
+        draw_embedded_board(ctx, t, board, loader, depth);
+    }
+}
+
+fn draw_embedded_board<C: RenderContext>(
+    ctx: &mut C,
+    t: &CoordTransform,
+    board: &EmbeddedBoard,
+    loader: Option<&dyn BoardLoader>,
+    depth: u8,
+) {
+    // Resolve the sub-document if a loader is wired up and we're under the
+    // recursion ceiling. Anything else falls back to a placeholder.
+    let sub_doc = if depth < MAX_EMBEDDED_DEPTH {
+        match loader {
+            Some(l) => board.resolve_with(l).ok(),
+            None => None,
+        }
+    } else {
+        None
+    };
+
+    let cols = board.col_count.max(1);
+    let rows = board.row_count.max(1);
+
+    // Cache a couple of screen-space helpers used per instance.
+    let zero_screen = t.world_to_screen(CoordPoint::new(Coord::ZERO, Coord::ZERO));
+
+    for col in 0..cols {
+        for row in 0..rows {
+            let inst_origin = CoordPoint::new(
+                board.x1_location + board.col_spacing * col,
+                board.y1_location + board.row_spacing * row,
+            );
+            let inst_origin_screen = t.world_to_screen(inst_origin);
+
+            match &sub_doc {
+                Some(sub) => {
+                    // Build the screen-space transform that places the sub-doc's
+                    // (0,0) at `inst_origin` in the parent's world space, with
+                    // the embedded board's rotation/mirror applied around that
+                    // anchor. See the math derivation: the sequence below is
+                    // equivalent to "render every sub-doc world point p as
+                    // parent_screen(rot(p) + origin_world)".
+                    ctx.save_state();
+                    ctx.translate(inst_origin_screen.0, inst_origin_screen.1);
+                    if board.rotation != 0.0 {
+                        ctx.rotate(board.rotation);
+                    }
+                    if board.mirror_flag {
+                        ctx.scale(-1.0, 1.0);
+                    }
+                    ctx.translate(-zero_screen.0, -zero_screen.1);
+
+                    render_document_inner(ctx, sub, t, loader, depth + 1);
+                    ctx.restore_state();
+                }
+                None => {
+                    // Placeholder — uses the parent-relative bounding box from
+                    // X1/Y1/X2/Y2, shifted by the per-instance offset.
+                    let dx = inst_origin.x - board.x1_location;
+                    let dy = inst_origin.y - board.y1_location;
+                    let p1 = CoordPoint::new(board.x1_location + dx, board.y1_location + dy);
+                    let p2 = CoordPoint::new(board.x2_location + dx, board.y2_location + dy);
+                    draw_embedded_placeholder(ctx, t, board, p1, p2);
+                }
+            }
+        }
+    }
+}
+
+fn draw_embedded_placeholder<C: RenderContext>(
+    ctx: &mut C,
+    t: &CoordTransform,
+    board: &EmbeddedBoard,
+    world_p1: CoordPoint,
+    world_p2: CoordPoint,
+) {
+    let (sx1, sy1) = t.world_to_screen(world_p1);
+    let (sx2, sy2) = t.world_to_screen(world_p2);
+    let x = sx1.min(sx2);
+    let y = sy1.min(sy2);
+    let w = (sx2 - sx1).abs();
+    let h = (sy2 - sy1).abs();
+    if w < 1.0 || h < 1.0 {
+        return;
+    }
+
+    // Visible but subdued — dashed-feeling stroke + faint fill — so a missing
+    // sibling stands out without dominating the parent draw.
+    let stroke = layer_color(board.layer);
+    let fill = Color {
+        r: stroke.r,
+        g: stroke.g,
+        b: stroke.b,
+        a: 0x20,
+    };
+    ctx.rectangle(x, y, w, h, 2.0, Some(stroke), Some(fill));
+
+    // Diagonals to make the "this is a placeholder" intent unambiguous.
+    ctx.line(x, y, x + w, y + h, 1.0, stroke);
+    ctx.line(x, y + h, x + w, y, 1.0, stroke);
+
+    // Label with the document_path so the user can tell which sub-board is
+    // missing without inspecting the model.
+    if let Some(path) = &board.document_path {
+        if !path.is_empty() {
+            let cx = x + w / 2.0;
+            let cy = y + h / 2.0;
+            let style = TextStyle {
+                h_anchor: TextAnchorH::Center,
+                v_anchor: TextAnchorV::Middle,
+                ..Default::default()
+            };
+            ctx.text_styled(cx, cy, 12.0, path, stroke, style);
+        }
     }
 }
 
@@ -485,6 +641,9 @@ impl Component {
 }
 
 impl Document {
+    /// Render to SVG. Embedded board references draw as labelled placeholders
+    /// — wire up a [`BoardLoader`] via [`render_svg_with_loader`](Self::render_svg_with_loader)
+    /// to fully render sub-documents.
     pub fn render_svg(&self, options: RenderOptions) -> String {
         let bounds = self.render_bounds();
         let t = CoordTransform::fit(bounds, options.width, options.height, options.padding);
@@ -501,11 +660,59 @@ impl Document {
         ctx.encode_png()
     }
 
-    pub fn render_bounds(&self) -> crate::coord::CoordRect {
+    /// Render to SVG, recursively dereferencing every [`EmbeddedBoard`]
+    /// through `loader`. References that don't resolve fall back to a
+    /// labelled placeholder so the failure is visible rather than silent.
+    pub fn render_svg_with_loader(
+        &self,
+        options: RenderOptions,
+        loader: &dyn BoardLoader,
+    ) -> String {
+        let bounds = self.render_bounds();
+        let t = CoordTransform::fit(bounds, options.width, options.height, options.padding);
+        let mut ctx = SvgContext::new(options);
+        render_document_with_loader(&mut ctx, self, &t, loader);
+        ctx.finish()
+    }
+
+    /// PNG counterpart to [`render_svg_with_loader`](Self::render_svg_with_loader).
+    pub fn render_png_with_loader(
+        &self,
+        options: RenderOptions,
+        loader: &dyn BoardLoader,
+    ) -> Result<Vec<u8>, String> {
+        let bounds = self.render_bounds();
+        let t = CoordTransform::fit(bounds, options.width, options.height, options.padding);
+        let mut ctx = super::raster::TinySkiaContext::new(options);
+        render_document_with_loader(&mut ctx, self, &t, loader);
+        ctx.encode_png()
+    }
+
+    /// World-space rectangle that bounds everything the document will draw,
+    /// including embedded-board reference rectangles (so sub-content fits
+    /// the auto-fit transform without clipping).
+    pub fn render_bounds(&self) -> CoordRect {
         let mut acc = self.bounds();
         for comp in &self.components {
             acc = acc.union(comp.bounds());
         }
+        for board in &self.embedded_boards {
+            acc = acc.union(embedded_array_bounds(board));
+        }
         acc
     }
+}
+
+/// World-space bounds of every instance of an embedded board's array.
+fn embedded_array_bounds(board: &EmbeddedBoard) -> CoordRect {
+    let cols = board.col_count.max(1);
+    let rows = board.row_count.max(1);
+    let dx = board.col_spacing * (cols - 1).max(0);
+    let dy = board.row_spacing * (rows - 1).max(0);
+    CoordRect::from_xyxy(
+        board.x1_location.min(board.x2_location),
+        board.y1_location.min(board.y2_location),
+        board.x1_location.max(board.x2_location) + dx,
+        board.y1_location.max(board.y2_location) + dy,
+    )
 }

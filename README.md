@@ -13,7 +13,7 @@ the `render` feature, for both PCB and schematic components.
 - `altium`: library.
 - `altium-derive`: `#[derive(AltiumRecord)]`, generates `from_params` /
   `to_params` for record DTOs.
-- `altium-cli`: `altium info | dump | render | inspect`.
+- `altium-cli`: `altium info | dump | render | inspect | flatten`.
 
 ## Usage
 
@@ -43,7 +43,17 @@ $ altium info parts.PcbLib
 $ altium render parts.PcbLib -o /tmp/out.svg
 $ altium dump parts.PcbLib
 $ altium inspect parts.PcbLib
+$ altium flatten panel.PcbDoc -o panel-flat.PcbDoc
+flattened 1/1 embedded boards from panel.PcbDoc
+  pads=556 tracks=898 arcs=136 vias=48 ... components=60
+wrote panel-flat.PcbDoc
 ```
+
+`flatten` recursively dereferences every embedded sub-board (looking next
+to the input file plus any `--search-path` directories), inlines and
+transforms its primitives into the parent, and writes a single
+self-contained `.PcbDoc`. Unresolved references stay as placeholders with a
+diagnostic.
 
 ## Features
 

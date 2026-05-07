@@ -1,5 +1,7 @@
 //! End-to-end round-trip tests for `.PcbLib` and `.PcbDoc`.
 
+#![allow(clippy::field_reassign_with_default)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -325,4 +327,365 @@ fn pcbdoc_typed_storages_populate() {
         total_assigned_pads > 0,
         "no pads were assigned to components by component_index"
     );
+}
+
+// ─── Embedded sub-board dereferencing ──────────────────────────────────────
+
+#[tokio::test]
+async fn embedded_board_resolves_against_testdata_pair() {
+    // `Power Adapter Panel.PcbDoc` references `USB Power Adapter.PcbDoc` as a
+    // sibling via DOCUMENTPATH. Resolving the embedded board against the
+    // testdata directory should produce a fully-parsed sub-document.
+    let Some(dir) = testdata_dir() else {
+        eprintln!("skipping: no testdata directory");
+        return;
+    };
+    let parent = dir.join("Power Adapter Panel.PcbDoc");
+    if !parent.exists() {
+        eprintln!("skipping: {parent:?} not present");
+        return;
+    }
+
+    let doc = pcb::Document::read(&parent).await.expect("read parent");
+    assert_eq!(
+        doc.embedded_boards.len(),
+        1,
+        "fixture should carry exactly one embedded board"
+    );
+    assert_eq!(
+        doc.embedded_boards[0].document_path.as_deref(),
+        Some("USB Power Adapter.PcbDoc")
+    );
+
+    // resolved_path joins relative to the parent directory.
+    let resolved = doc.embedded_boards[0]
+        .resolved_path(&dir)
+        .expect("path resolves");
+    assert_eq!(resolved.file_name().unwrap(), "USB Power Adapter.PcbDoc");
+
+    // Single-board resolver returns the sub-document.
+    let sub = doc.embedded_boards[0]
+        .resolve_at(&dir)
+        .await
+        .expect("sub-board parses");
+    let pad_count = sub.pads.len();
+    let component_count = sub.components.len();
+    assert!(
+        pad_count + component_count + sub.tracks.len() > 0,
+        "sub-board parsed empty"
+    );
+
+    // Document-level batch resolver returns one entry parallel to embedded_boards.
+    let resolved_all = doc.resolve_embedded_boards_at(&dir).await;
+    assert_eq!(resolved_all.len(), 1);
+    let sub_again = resolved_all
+        .into_iter()
+        .next()
+        .unwrap()
+        .expect("batch resolution succeeds");
+    assert_eq!(sub_again.pads.len(), pad_count);
+    assert_eq!(sub_again.components.len(), component_count);
+}
+
+#[tokio::test]
+async fn embedded_board_custom_loader_can_intercept() {
+    use altium::pcb::{BoardLoader, FileBoardLoader};
+
+    let Some(dir) = testdata_dir() else {
+        eprintln!("skipping: no testdata directory");
+        return;
+    };
+    let parent = dir.join("Power Adapter Panel.PcbDoc");
+    if !parent.exists() {
+        eprintln!("skipping: {parent:?} not present");
+        return;
+    }
+    let doc = pcb::Document::read(&parent).await.expect("read parent");
+
+    // A counting loader that delegates to FileBoardLoader. Demonstrates the
+    // trait wiring works for caching / observability use cases.
+    struct Counting<'a> {
+        inner: &'a FileBoardLoader,
+        count: std::cell::Cell<usize>,
+    }
+    impl BoardLoader for Counting<'_> {
+        fn load(&self, document_path: &str) -> altium::Result<Option<Vec<u8>>> {
+            self.count.set(self.count.get() + 1);
+            self.inner.load(document_path)
+        }
+    }
+
+    let inner = FileBoardLoader::new(&dir);
+    let counting = Counting {
+        inner: &inner,
+        count: std::cell::Cell::new(0),
+    };
+    let results = doc.resolve_embedded_boards_with(&counting);
+    assert_eq!(results.len(), 1);
+    assert!(results.into_iter().next().unwrap().is_ok());
+    assert_eq!(counting.count.get(), 1, "loader was consulted exactly once");
+}
+
+// ─── Embedded sub-board flattening ────────────────────────────────────────
+
+#[tokio::test]
+async fn flatten_embedded_boards_inlines_subdoc_primitives() {
+    let Some(dir) = testdata_dir() else {
+        eprintln!("skipping: no testdata directory");
+        return;
+    };
+    let parent_path = dir.join("Power Adapter Panel.PcbDoc");
+    let sibling = dir.join("USB Power Adapter.PcbDoc");
+    if !parent_path.exists() || !sibling.exists() {
+        eprintln!("skipping: testdata pair not present");
+        return;
+    }
+
+    // Read both docs separately so we have ground-truth counts.
+    let parent = pcb::Document::read(&parent_path).await.expect("parent");
+    let sub = pcb::Document::read(&sibling).await.expect("sibling");
+    let flat = parent.flatten_embedded_boards_at(&dir).await;
+
+    // After flattening, no embedded references should remain.
+    assert!(
+        flat.embedded_boards.is_empty(),
+        "all embedded references should resolve in the testdata pair"
+    );
+
+    // Power Adapter Panel.PcbDoc has a 3×4 array of USB Power Adapter.PcbDoc.
+    let board = &parent.embedded_boards[0];
+    let instances =
+        (board.col_count.max(1) as usize) * (board.row_count.max(1) as usize);
+    assert_eq!(instances, 12, "fixture is 3×4");
+
+    // Each sub-doc primitive should appear `instances` times in the flat
+    // result, on top of the parent's own primitives.
+    assert_eq!(
+        flat.tracks.len(),
+        parent.tracks.len() + sub.tracks.len() * instances,
+        "track count = parent + instances × sub.tracks"
+    );
+    assert_eq!(
+        flat.pads.len(),
+        parent.pads.len() + sub.pads.len() * instances,
+        "pad count = parent + instances × sub.pads"
+    );
+    assert_eq!(
+        flat.components.len(),
+        parent.components.len() + sub.components.len() * instances,
+        "component count parallels"
+    );
+
+    // Diagnostics should be empty when everything resolved.
+    assert!(
+        flat.diagnostics.is_empty(),
+        "diagnostics should be empty on full resolution; got {:?}",
+        flat.diagnostics
+    );
+
+    // Bounds expand to include the array spread (sanity: flat bounds ⊇ parent
+    // bounds).
+    let parent_bb = parent.bounds();
+    let flat_bb = flat.bounds();
+    if !parent_bb.is_empty() {
+        assert!(
+            flat_bb.min.x <= parent_bb.min.x && flat_bb.min.y <= parent_bb.min.y,
+            "flat bounds {flat_bb:?} should contain parent bounds {parent_bb:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
+    use altium::pcb::EmbeddedBoard;
+    use altium::{Coord, CoordPoint};
+
+    // Build a synthetic sub-doc with a single pad at the origin, then a
+    // parent with a 2×3 array of it, and verify the flattened pads sit at
+    // the expected world offsets.
+    let mut sub = pcb::Document::default();
+    let mut pad = pcb::Pad::default();
+    pad.location = CoordPoint::new(Coord::ZERO, Coord::ZERO);
+    pad.size_top = CoordPoint::new(Coord::from_mils(40.0), Coord::from_mils(40.0));
+    pad.size_middle = pad.size_top;
+    pad.size_bottom = pad.size_top;
+    pad.layer = 1;
+    sub.pads.push(pad);
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    // In-memory loader for the synthetic sub-doc.
+    struct Mem(Vec<u8>);
+    impl pcb::BoardLoader for Mem {
+        fn load(&self, _: &str) -> altium::Result<Option<Vec<u8>>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+    let loader = Mem(sub_bytes);
+
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Sub.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(100.0);
+    board.y1_location = Coord::from_mils(50.0);
+    board.x2_location = Coord::from_mils(140.0);
+    board.y2_location = Coord::from_mils(90.0);
+    board.col_count = 2;
+    board.row_count = 3;
+    board.col_spacing = Coord::from_mils(200.0);
+    board.row_spacing = Coord::from_mils(150.0);
+    parent.embedded_boards.push(board);
+
+    let flat = parent.flatten_embedded_boards_with(&loader);
+    assert_eq!(flat.pads.len(), 6, "2×3 array of one-pad sub-doc");
+
+    // Each pad should be at (X1 + col*col_spacing, Y1 + row*row_spacing).
+    let mut got: Vec<(i32, i32)> = flat
+        .pads
+        .iter()
+        .map(|p| (p.location.x.to_raw(), p.location.y.to_raw()))
+        .collect();
+    got.sort();
+    let mut expected: Vec<(i32, i32)> = Vec::new();
+    for col in 0..2 {
+        for row in 0..3 {
+            expected.push((
+                Coord::from_mils(100.0 + 200.0 * col as f64).to_raw(),
+                Coord::from_mils(50.0 + 150.0 * row as f64).to_raw(),
+            ));
+        }
+    }
+    expected.sort();
+    assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn flatten_unresolved_board_is_preserved_with_diagnostic() {
+    use altium::pcb::EmbeddedBoard;
+    use altium::{Coord, CoordPoint};
+
+    // Loader that knows about no boards.
+    struct Empty;
+    impl pcb::BoardLoader for Empty {
+        fn load(&self, _: &str) -> altium::Result<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
+    let mut parent = pcb::Document::default();
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Missing.PcbDoc".into());
+    board.layer = 1;
+    board.x1_location = Coord::from_mils(0.0);
+    board.y1_location = Coord::from_mils(0.0);
+    board.x2_location = Coord::from_mils(100.0);
+    board.y2_location = Coord::from_mils(100.0);
+    board.col_count = 1;
+    board.row_count = 1;
+    parent.embedded_boards.push(board);
+
+    let flat = parent.flatten_embedded_boards_with(&Empty);
+
+    // Reference is preserved (so a renderer can still placeholder it) and a
+    // diagnostic explains the failure.
+    assert_eq!(flat.embedded_boards.len(), 1);
+    assert_eq!(
+        flat.embedded_boards[0].document_path.as_deref(),
+        Some("Missing.PcbDoc")
+    );
+    assert!(
+        !flat.diagnostics.is_empty(),
+        "missing sub-board should emit a diagnostic"
+    );
+    let msg = flat.diagnostics[0].message.clone();
+    assert!(
+        msg.contains("Missing.PcbDoc"),
+        "diagnostic should name the missing path; got: {msg}"
+    );
+    let _ = CoordPoint::default(); // suppress unused-import warning if test path skips
+}
+
+#[tokio::test]
+async fn flatten_self_referencing_board_caps_recursion() {
+    use altium::pcb::EmbeddedBoard;
+    use altium::{Coord, CoordPoint};
+
+    let mut sub = pcb::Document::default();
+    let mut self_ref = EmbeddedBoard::default();
+    self_ref.document_path = Some("Self.PcbDoc".into());
+    self_ref.layer = 1;
+    self_ref.x1_location = Coord::from_mils(0.0);
+    self_ref.y1_location = Coord::from_mils(0.0);
+    self_ref.x2_location = Coord::from_mils(50.0);
+    self_ref.y2_location = Coord::from_mils(50.0);
+    self_ref.col_count = 1;
+    self_ref.row_count = 1;
+    sub.embedded_boards.push(self_ref);
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    struct Mem(Vec<u8>);
+    impl pcb::BoardLoader for Mem {
+        fn load(&self, _: &str) -> altium::Result<Option<Vec<u8>>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+    let loader = Mem(sub_bytes);
+
+    let mut parent = pcb::Document::default();
+    let mut top = EmbeddedBoard::default();
+    top.document_path = Some("Self.PcbDoc".into());
+    top.layer = 1;
+    top.x1_location = Coord::from_mils(0.0);
+    top.y1_location = Coord::from_mils(0.0);
+    top.x2_location = Coord::from_mils(100.0);
+    top.y2_location = Coord::from_mils(100.0);
+    top.col_count = 1;
+    top.row_count = 1;
+    parent.embedded_boards.push(top);
+
+    // Should terminate; the deepest sub-board reference is preserved at the
+    // ceiling and surfaces a "max recursion depth" diagnostic.
+    let flat = parent.flatten_embedded_boards_with(&loader);
+    assert_eq!(
+        flat.embedded_boards.len(),
+        1,
+        "exactly one preserved reference at the depth cap"
+    );
+    let msg = flat.diagnostics.last().unwrap().message.clone();
+    assert!(
+        msg.contains("max recursion depth") || msg.contains("recursion"),
+        "expected depth-limit diagnostic; got: {msg}"
+    );
+    let _ = CoordPoint::default();
+}
+
+#[tokio::test]
+async fn embedded_board_resolution_fails_cleanly_when_sibling_missing() {
+    // Resolving against an empty directory should produce a structured error
+    // rather than panic.
+    let Some(dir) = testdata_dir() else {
+        eprintln!("skipping: no testdata directory");
+        return;
+    };
+    let parent = dir.join("Power Adapter Panel.PcbDoc");
+    if !parent.exists() {
+        eprintln!("skipping: {parent:?} not present");
+        return;
+    }
+    let doc = pcb::Document::read(&parent).await.expect("read parent");
+
+    let empty = std::env::temp_dir().join(format!(
+        "altium-rs-empty-{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&empty).unwrap();
+    let results = doc.resolve_embedded_boards_at(&empty).await;
+    assert_eq!(results.len(), 1);
+    let err = results.into_iter().next().unwrap().unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("USB Power Adapter") || msg.contains("not found"),
+        "expected a 'not found' error mentioning the missing sibling, got: {msg}"
+    );
+    let _ = std::fs::remove_dir(&empty);
 }
