@@ -11,6 +11,11 @@
 //!     AltiumFile::PcbLibrary(lib) => println!("{} footprints", lib.components.len()),
 //!     AltiumFile::SchDocument(doc) => println!("{} raw records", doc.raw_records.len()),
 //!     AltiumFile::SchLibrary(lib) => println!("{} symbols", lib.components.len()),
+//!     AltiumFile::IntegratedLibrary(intlib) => println!(
+//!         "IntLib: {} sch + {} pcb",
+//!         intlib.schematic_libraries.len(),
+//!         intlib.footprint_libraries.len(),
+//!     ),
 //! }
 //! # Ok(()) }
 //! ```
@@ -20,9 +25,10 @@ use std::path::Path;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::{Error, Result};
+use crate::intlib::IntegratedLibrary;
 use crate::{pcb, sch};
 
-/// The kind of Altium file. Matches the four supported on-disk formats.
+/// The kind of Altium file. Matches the five supported on-disk formats.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AltiumFileKind {
     /// `.PcbLib`: PCB footprint library.
@@ -33,6 +39,8 @@ pub enum AltiumFileKind {
     PcbDocument,
     /// `.SchDoc`: schematic document.
     SchDocument,
+    /// `.IntLib`: compiled integrated library bundling SchLib + PcbLib.
+    IntegratedLibrary,
 }
 
 impl AltiumFileKind {
@@ -48,6 +56,8 @@ impl AltiumFileKind {
             Some(Self::PcbDocument)
         } else if ext.eq_ignore_ascii_case("schdoc") {
             Some(Self::SchDocument)
+        } else if ext.eq_ignore_ascii_case("intlib") {
+            Some(Self::IntegratedLibrary)
         } else {
             None
         }
@@ -69,12 +79,16 @@ impl AltiumFileKind {
             Self::SchLibrary => ".SchLib",
             Self::PcbDocument => ".PcbDoc",
             Self::SchDocument => ".SchDoc",
+            Self::IntegratedLibrary => ".IntLib",
         }
     }
 
-    /// `true` for `.PcbLib` and `.SchLib`.
+    /// `true` for `.PcbLib`, `.SchLib`, and `.IntLib`.
     pub fn is_library(self) -> bool {
-        matches!(self, Self::PcbLibrary | Self::SchLibrary)
+        matches!(
+            self,
+            Self::PcbLibrary | Self::SchLibrary | Self::IntegratedLibrary
+        )
     }
 
     /// `true` for `.PcbDoc` and `.SchDoc`.
@@ -91,6 +105,7 @@ pub enum AltiumFile {
     SchLibrary(sch::Library),
     PcbDocument(pcb::Document),
     SchDocument(sch::Document),
+    IntegratedLibrary(IntegratedLibrary),
 }
 
 impl AltiumFile {
@@ -114,6 +129,9 @@ impl AltiumFile {
             AltiumFileKind::SchLibrary => Self::SchLibrary(sch::Library::from_bytes(bytes)?),
             AltiumFileKind::PcbDocument => Self::PcbDocument(pcb::Document::from_bytes(bytes)?),
             AltiumFileKind::SchDocument => Self::SchDocument(sch::Document::from_bytes(bytes)?),
+            AltiumFileKind::IntegratedLibrary => {
+                Self::IntegratedLibrary(IntegratedLibrary::from_bytes(bytes)?)
+            }
         })
     }
 
@@ -134,6 +152,7 @@ impl AltiumFile {
             Self::SchLibrary(lib) => lib.to_bytes(),
             Self::PcbDocument(doc) => doc.to_bytes(),
             Self::SchDocument(doc) => doc.to_bytes(),
+            Self::IntegratedLibrary(lib) => lib.to_bytes(),
         }
     }
 
@@ -152,6 +171,7 @@ impl AltiumFile {
             Self::SchLibrary(_) => AltiumFileKind::SchLibrary,
             Self::PcbDocument(_) => AltiumFileKind::PcbDocument,
             Self::SchDocument(_) => AltiumFileKind::SchDocument,
+            Self::IntegratedLibrary(_) => AltiumFileKind::IntegratedLibrary,
         }
     }
 
@@ -178,6 +198,13 @@ impl AltiumFile {
     }
     pub fn as_sch_document(&self) -> Option<&sch::Document> {
         if let Self::SchDocument(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    pub fn as_integrated_library(&self) -> Option<&IntegratedLibrary> {
+        if let Self::IntegratedLibrary(v) = self {
             Some(v)
         } else {
             None
@@ -212,6 +239,13 @@ impl AltiumFile {
             None
         }
     }
+    pub fn as_integrated_library_mut(&mut self) -> Option<&mut IntegratedLibrary> {
+        if let Self::IntegratedLibrary(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 
     pub fn into_pcb_library(self) -> Option<pcb::Library> {
         if let Self::PcbLibrary(v) = self {
@@ -241,6 +275,13 @@ impl AltiumFile {
             None
         }
     }
+    pub fn into_integrated_library(self) -> Option<IntegratedLibrary> {
+        if let Self::IntegratedLibrary(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 }
 
 impl From<pcb::Library> for AltiumFile {
@@ -261,6 +302,11 @@ impl From<pcb::Document> for AltiumFile {
 impl From<sch::Document> for AltiumFile {
     fn from(v: sch::Document) -> Self {
         Self::SchDocument(v)
+    }
+}
+impl From<IntegratedLibrary> for AltiumFile {
+    fn from(v: IntegratedLibrary) -> Self {
+        Self::IntegratedLibrary(v)
     }
 }
 
@@ -369,6 +415,78 @@ mod tests {
         let file = AltiumFile::from_bytes(AltiumFileKind::SchLibrary, bytes).unwrap();
         assert_eq!(file.kind(), AltiumFileKind::SchLibrary);
         assert_eq!(file.as_sch_library().unwrap().components.len(), 1);
+    }
+
+    #[test]
+    fn from_bytes_round_trip_intlib() {
+        use crate::IntegratedLibrary;
+        let mut sch_lib = sch::Library::default();
+        sch_lib.components.push(sch::Component::new("U1"));
+        let mut pcb_lib = pcb::Library::default();
+        pcb_lib.unique_id = "INTLIB01".into();
+        pcb_lib.components.push(pcb::Component::new("R0402"));
+
+        let mut intlib = IntegratedLibrary::default();
+        intlib.schematic_libraries.push(super::super::intlib::NamedLibrary {
+            name: "Parts.SchLib".into(),
+            library: sch_lib,
+        });
+        intlib.footprint_libraries.push(super::super::intlib::NamedLibrary {
+            name: "Parts.PcbLib".into(),
+            library: pcb_lib,
+        });
+        let bytes = intlib.to_bytes().unwrap();
+
+        let file = AltiumFile::from_bytes(AltiumFileKind::IntegratedLibrary, bytes).unwrap();
+        assert_eq!(file.kind(), AltiumFileKind::IntegratedLibrary);
+        let intlib = file.as_integrated_library().expect("IntegratedLibrary variant");
+        assert_eq!(intlib.schematic_libraries.len(), 1);
+        assert_eq!(intlib.footprint_libraries.len(), 1);
+    }
+
+    #[test]
+    fn intlib_extension_dispatch() {
+        use std::path::PathBuf;
+        for ext in ["IntLib", ".IntLib", "INTLIB", "intlib"] {
+            assert_eq!(
+                AltiumFileKind::from_extension(ext),
+                Some(AltiumFileKind::IntegratedLibrary)
+            );
+        }
+        assert_eq!(
+            AltiumFileKind::from_path(PathBuf::from("Parts.IntLib")),
+            Some(AltiumFileKind::IntegratedLibrary)
+        );
+        assert_eq!(AltiumFileKind::IntegratedLibrary.extension(), ".IntLib");
+        assert!(AltiumFileKind::IntegratedLibrary.is_library());
+        assert!(!AltiumFileKind::IntegratedLibrary.is_document());
+    }
+
+    #[tokio::test]
+    async fn read_intlib_from_disk_round_trips_through_cli_dispatch() {
+        // Build a synthetic IntLib, write it to a temp path, and verify
+        // `AltiumFile::read` (which dispatches via path extension) brings
+        // back the IntegratedLibrary variant.
+        use crate::IntegratedLibrary;
+        let nonce = std::process::id();
+        let path = std::env::temp_dir().join(format!("altium-rs-IntLib-{nonce}.IntLib"));
+        let _ = std::fs::remove_file(&path);
+
+        let mut sch_lib = sch::Library::default();
+        sch_lib.components.push(sch::Component::new("U1"));
+        let mut intlib = IntegratedLibrary::default();
+        intlib.schematic_libraries.push(super::super::intlib::NamedLibrary {
+            name: "Parts.SchLib".into(),
+            library: sch_lib,
+        });
+        intlib.write(&path).await.unwrap();
+
+        let file = open(&path).await.unwrap();
+        assert_eq!(file.kind(), AltiumFileKind::IntegratedLibrary);
+        let intlib = file.as_integrated_library().unwrap();
+        assert_eq!(intlib.schematic_libraries.len(), 1);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

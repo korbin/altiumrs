@@ -12,6 +12,7 @@ pub mod encoding;
 pub mod enums;
 pub mod error;
 pub mod file;
+pub mod intlib;
 pub mod parameter;
 pub mod pcb;
 #[cfg(feature = "render")]
@@ -30,3 +31,4 @@ pub use enums::{
 };
 pub use error::{Error, Result};
 pub use file::{AltiumFile, AltiumFileKind, open};
+pub use intlib::{IntegratedLibrary, NamedLibrary};

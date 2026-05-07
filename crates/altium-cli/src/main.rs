@@ -131,6 +131,17 @@ async fn cmd_info(path: &Path) -> Result<()> {
             "raw_records": doc.raw_records.len(),
             "additional_streams": doc.additional_streams.len(),
         }),
+        AltiumFile::IntegratedLibrary(intlib) => json!({
+            "kind": "IntLib",
+            "schematic_libraries": intlib.schematic_libraries.iter()
+                .map(|e| serde_json::json!({ "name": e.name, "components": e.library.components.len() }))
+                .collect::<Vec<_>>(),
+            "footprint_libraries": intlib.footprint_libraries.iter()
+                .map(|e| serde_json::json!({ "name": e.name, "components": e.library.components.len() }))
+                .collect::<Vec<_>>(),
+            "additional_files": intlib.additional_files.keys().collect::<Vec<_>>(),
+            "manifest_keys": intlib.manifest.keys().collect::<Vec<_>>(),
+        }),
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
@@ -230,6 +241,41 @@ async fn cmd_render(
                 tokio::fs::write(output, png).await?;
             }
         }
+        AltiumFile::IntegratedLibrary(intlib) => {
+            // IntLibs bundle libraries — pick one schematic or footprint by
+            // name (or the first if --component is omitted) and render that.
+            // The render path doesn't extend across nested IntLib structure;
+            // users wanting both halves can render twice.
+            let want = component;
+            let comp_pcb = intlib
+                .footprint_libraries
+                .iter()
+                .find_map(|e| pick_pcb_component(&e.library, want).ok());
+            let comp_sch = intlib
+                .schematic_libraries
+                .iter()
+                .find_map(|e| pick_sch_component(&e.library, want).ok());
+            if let Some(comp) = comp_pcb {
+                if svg_target {
+                    tokio::fs::write(output, comp.render_svg(opts)).await?;
+                } else {
+                    let png = comp.render_png(opts).map_err(|e| anyhow!(e))?;
+                    tokio::fs::write(output, png).await?;
+                }
+            } else if let Some(comp) = comp_sch {
+                if svg_target {
+                    tokio::fs::write(output, comp.render_svg(opts)).await?;
+                } else {
+                    let png = comp.render_png(opts).map_err(|e| anyhow!(e))?;
+                    tokio::fs::write(output, png).await?;
+                }
+            } else {
+                return Err(anyhow!(
+                    "IntLib has no renderable components matching {:?}",
+                    want
+                ));
+            }
+        }
     }
     println!("wrote {}", output.display());
     Ok(())
@@ -315,6 +361,12 @@ async fn cmd_inspect(path: &Path, component: Option<&str>) -> Result<()> {
         AltiumFile::SchDocument(doc) => json!({
             "raw_records": doc.raw_records.len(),
             "additional_streams_keys": doc.additional_streams.keys().collect::<Vec<_>>(),
+        }),
+        AltiumFile::IntegratedLibrary(intlib) => json!({
+            "schematic_libraries": intlib.schematic_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+            "footprint_libraries": intlib.footprint_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+            "additional_files": intlib.additional_files.keys().collect::<Vec<_>>(),
+            "manifest": intlib.manifest.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<std::collections::BTreeMap<_, _>>(),
         }),
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -412,5 +464,6 @@ fn kind_label(file: &AltiumFile) -> &'static str {
         AltiumFile::SchLibrary(_) => ".SchLib",
         AltiumFile::PcbDocument(_) => ".PcbDoc",
         AltiumFile::SchDocument(_) => ".SchDoc",
+        AltiumFile::IntegratedLibrary(_) => ".IntLib",
     }
 }
