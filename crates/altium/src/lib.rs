@@ -13,6 +13,7 @@ pub mod enums;
 pub mod error;
 pub mod file;
 pub mod intlib;
+pub mod libpkg;
 pub mod parameter;
 pub mod pcb;
 #[cfg(feature = "render")]
@@ -31,4 +32,10 @@ pub use enums::{
 };
 pub use error::{Error, Result};
 pub use file::{AltiumFile, AltiumFileKind, open};
-pub use intlib::{IntegratedLibrary, NamedLibrary};
+pub use intlib::{
+    CrossRefRecord, CrossReferenceFootprint, CrossReferenceSymbol, CrossReferenceTable,
+    IntegratedLibrary, NamedLibrary, flatten_cross_reference_table, parse_cross_reference,
+    parse_cross_reference_table, parse_parameters_bin, serialise_cross_reference,
+    serialise_parameters_bin,
+};
+pub use libpkg::{DocumentReference, LibraryPackage, SplitResult};

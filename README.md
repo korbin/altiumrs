@@ -1,7 +1,8 @@
 # altium
 
 Pure-Rust read/write for Altium Designer files: `.SchLib`, `.SchDoc`,
-`.PcbLib`, `.PcbDoc`, `.IntLib`. Round-trips every fixture in `testdata/`.
+`.PcbLib`, `.PcbDoc`, `.IntLib`, `.LibPkg`. Round-trips every fixture in
+`testdata/`.
 
 PCB has a typed model: build a `PcbLib` / `PcbDoc` from scratch, mutate,
 write. Schematic round-trips by replaying raw records; the typed model
@@ -13,7 +14,7 @@ the `render` feature, for both PCB and schematic components.
 - `altium`: library.
 - `altium-derive`: `#[derive(AltiumRecord)]`, generates `from_params` /
   `to_params` for record DTOs.
-- `altium-cli`: `altium info | dump | render | inspect | flatten`.
+- `altium-cli`: `altium info | dump | render | inspect | flatten | split`.
 
 ## Usage
 
@@ -34,9 +35,12 @@ async fn main() -> altium::Result<()> {
 }
 ```
 
-All five file kinds: `from_bytes` / `to_bytes`, `read` / `write` (async).
+All six file kinds: `from_bytes` / `to_bytes`, `read` / `write` (async).
 `.IntLib` is exposed as `altium::IntegratedLibrary` and surfaces the bundled
 `.SchLib` / `.PcbLib` files plus any datasheets / sim-model streams.
+`.LibPkg` is exposed as `altium::LibraryPackage` — author one with
+`with_defaults().add_document(path)`, or split an `.IntLib` back to a
+project + sources via `IntegratedLibrary::split_to_directory`.
 
 ```sh
 $ cargo install --path crates/altium-cli

@@ -322,6 +322,226 @@ async fn write_real_intlib_back_then_extract_libraries() {
 }
 
 #[tokio::test]
+async fn parameters_bin_decoder_extracts_real_component_metadata() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let blocks = intlib.parameters_blocks().expect("decode parameters");
+    assert!(
+        !blocks.is_empty(),
+        "Parameters .bin should yield at least one block"
+    );
+
+    // The first block in this fixture is the symbol's full parameter set.
+    let first = &blocks[0];
+    assert!(
+        first.contains("Comment=TPS26630RGER"),
+        "first block should be the symbol parameters, got: {first}"
+    );
+    assert!(first.contains("Designator=CMP-04913-000051-1"));
+    assert!(first.contains("Library Reference=CMP-04913-000051-1"));
+    assert!(first.contains("Footprint=FP-RGE0024H-MFG"));
+
+    // Subsequent blocks are footprint summaries.
+    assert!(
+        blocks[1..]
+            .iter()
+            .all(|b| b.contains("Pad Count=") && b.contains("Height=")),
+        "footprint summary blocks each carry Pad Count + Height"
+    );
+}
+
+#[tokio::test]
+async fn parameters_bin_byte_stable_round_trip_on_real_fixture() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let original = intlib
+        .parameters_bin
+        .as_ref()
+        .expect("real IntLib has Parameters .bin");
+    let blocks = intlib.parameters_blocks().expect("decode");
+    let reserialised = altium::serialise_parameters_bin(&blocks);
+    // Strict byte equality: the encoder is the exact inverse of the decoder
+    // for the values Altium emits.
+    assert_eq!(
+        reserialised, *original,
+        "Parameters .bin byte-stable round-trip on real Altium fixture"
+    );
+}
+
+#[tokio::test]
+async fn cross_reference_decoder_extracts_real_component_paths() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let records = intlib
+        .cross_reference_records()
+        .expect("decode cross-reference");
+
+    // Pull every string value out of the token stream; we should see the
+    // symbol identifier, the description, and the footprint names that the
+    // fixture's IntLib catalogues.
+    let strings: Vec<&str> = records
+        .iter()
+        .filter_map(|r| match r {
+            altium::CrossRefRecord::String(s) => Some(s.as_str()),
+            altium::CrossRefRecord::Tag(_) => None,
+        })
+        .collect();
+
+    assert!(
+        strings.contains(&"CMP-04913-000051-1"),
+        "symbol LibRef must appear; saw: {strings:?}"
+    );
+    assert!(
+        strings.iter().any(|s| s.contains("IC PWR MGMT BATTERY MGMT")),
+        "symbol description must appear"
+    );
+    assert!(
+        strings.iter().any(|s| s.contains("FP-RGE0024H-MFG")),
+        "primary footprint name must appear"
+    );
+    assert!(
+        strings.iter().any(|s| s.contains(":\\SchLib\\0.schlib")),
+        "internal SchLib path must appear"
+    );
+    assert!(
+        strings.iter().any(|s| s.contains(":\\PCBLib\\0.pcblib")),
+        "internal PcbLib path must appear"
+    );
+}
+
+#[tokio::test]
+async fn cross_reference_byte_stable_round_trip_on_real_fixture() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let original = intlib
+        .cross_reference
+        .as_ref()
+        .expect("real IntLib has LibCrossRef.Txt");
+    let records = intlib
+        .cross_reference_records()
+        .expect("decode cross-reference");
+    let reserialised = altium::serialise_cross_reference(&records);
+    assert_eq!(
+        reserialised, *original,
+        "LibCrossRef.Txt byte-stable round-trip on real Altium fixture"
+    );
+}
+
+#[tokio::test]
+async fn cross_reference_table_decodes_real_fixture() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let table = intlib
+        .cross_reference_table()
+        .expect("decode cross-reference table");
+    assert_eq!(table.symbols.len(), 1, "fixture has one symbol");
+
+    let sym = &table.symbols[0];
+    assert_eq!(sym.libref, "CMP-04913-000051-1");
+    assert_eq!(sym.internal_schlib_path, ":\\SchLib\\0.schlib");
+    assert_eq!(sym.description, "IC PWR MGMT BATTERY MGMT");
+    assert!(
+        sym.source_schlib_path.ends_with(".SchLib"),
+        "source path should reference the source .SchLib; got {}",
+        sym.source_schlib_path
+    );
+    assert!(sym.source_schlib_path.contains("Components - 06.05.26 - 21.20"));
+
+    // The fixture has 4 footprint variants — IPC_A, IPC_B, IPC_C, MFG.
+    assert_eq!(
+        sym.footprints.len(),
+        4,
+        "expected 4 footprint variants; got {:?}",
+        sym.footprints.iter().map(|f| &f.name).collect::<Vec<_>>()
+    );
+    let names: Vec<&str> = sym.footprints.iter().map(|f| f.name.as_str()).collect();
+    assert!(names.contains(&"FP-RGE0024H-IPC_A"));
+    assert!(names.contains(&"FP-RGE0024H-IPC_B"));
+    assert!(names.contains(&"FP-RGE0024H-IPC_C"));
+    assert!(names.contains(&"FP-RGE0024H-MFG"));
+
+    for fp in &sym.footprints {
+        assert_eq!(fp.kind, "PCBLIB");
+        assert_eq!(fp.internal_pcblib_path, ":\\PCBLib\\0.pcblib");
+        assert!(fp.source_pcblib_path.contains(".PcbLib"));
+    }
+}
+
+#[tokio::test]
+async fn cross_reference_table_byte_stable_round_trip_on_real_fixture() {
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let intlib = IntegratedLibrary::read(&path).await.unwrap();
+    let original = intlib
+        .cross_reference
+        .as_ref()
+        .expect("real IntLib has cross-reference")
+        .clone();
+
+    // Decode → typed table → flatten → re-encode → bytes; verify byte-equal.
+    let table = intlib.cross_reference_table().expect("decode table");
+    let mut copy = intlib.clone();
+    copy.set_cross_reference_table(&table);
+    let reserialised = copy
+        .cross_reference
+        .as_ref()
+        .expect("re-emitted cross-reference");
+    assert_eq!(
+        reserialised, &original,
+        "typed-table round-trip is byte-stable on real Altium fixture"
+    );
+}
+
+#[tokio::test]
+async fn intlib_full_byte_round_trip_via_typed_codecs() {
+    // Read the full IntLib, decode every typed surface (libraries, parameters,
+    // cross-reference), re-encode them through their typed codecs, write the
+    // IntLib back, and verify the resulting model matches.
+    let Some(path) = fixture_intlib() else {
+        eprintln!("skipping: fixture not present");
+        return;
+    };
+    let mut intlib = IntegratedLibrary::read(&path).await.unwrap();
+
+    // Decode parameters and cross-reference, then re-encode by setting them
+    // back via the typed accessors. This exercises the full encode/decode
+    // path on real Altium-emitted bytes.
+    let blocks = intlib.parameters_blocks().unwrap();
+    let xrefs = intlib.cross_reference_records().unwrap();
+    intlib.set_parameters_blocks(&blocks);
+    intlib.set_cross_reference_records(&xrefs);
+
+    // Now write and re-read.
+    let bytes = intlib.to_bytes().expect("write");
+    let parsed = IntegratedLibrary::from_bytes(bytes).expect("read");
+
+    // Parameters and cross-reference came back identical to what we started with.
+    assert_eq!(parsed.parameters_blocks().unwrap(), blocks);
+    assert_eq!(parsed.cross_reference_records().unwrap(), xrefs);
+
+    // Library counts unchanged.
+    assert_eq!(parsed.schematic_libraries.len(), 1);
+    assert_eq!(parsed.footprint_libraries.len(), 1);
+}
+
+#[tokio::test]
 async fn altium_file_unified_dispatch_finds_intlib() {
     let Some(path) = fixture_intlib() else {
         eprintln!("skipping: fixture not present");

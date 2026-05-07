@@ -62,6 +62,19 @@ enum Command {
         #[arg(long)]
         search_path: Vec<PathBuf>,
     },
+    /// Split an `.IntLib` into its constituent source files (`.SchLib`,
+    /// `.PcbLib`, datasheets, …) plus a matching `.LibPkg` project file.
+    Split {
+        /// Source `.IntLib` file.
+        path: PathBuf,
+        /// Output directory. Created if it doesn't exist.
+        #[arg(short, long)]
+        out_dir: PathBuf,
+        /// Basename for the emitted `.LibPkg` (defaults to the input file's
+        /// stem).
+        #[arg(long)]
+        name: Option<String>,
+    },
 }
 
 #[tokio::main]
@@ -90,6 +103,11 @@ async fn main() -> Result<()> {
             output,
             search_path,
         } => cmd_flatten(&path, output.as_deref(), &search_path).await,
+        Command::Split {
+            path,
+            out_dir,
+            name,
+        } => cmd_split(&path, &out_dir, name.as_deref()).await,
     }
 }
 
@@ -141,6 +159,11 @@ async fn cmd_info(path: &Path) -> Result<()> {
                 .collect::<Vec<_>>(),
             "additional_files": intlib.additional_files.keys().collect::<Vec<_>>(),
             "manifest_keys": intlib.manifest.keys().collect::<Vec<_>>(),
+        }),
+        AltiumFile::LibraryPackage(pkg) => json!({
+            "kind": "LibPkg",
+            "documents": pkg.documents().iter().map(|d| &d.document_path).cloned().collect::<Vec<_>>(),
+            "section_names": pkg.sections.keys().collect::<Vec<_>>(),
         }),
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -276,6 +299,11 @@ async fn cmd_render(
                 ));
             }
         }
+        AltiumFile::LibraryPackage(_) => {
+            return Err(anyhow!(
+                "LibPkg is a project file with no rendered geometry; render the referenced .SchLib / .PcbLib instead"
+            ));
+        }
     }
     println!("wrote {}", output.display());
     Ok(())
@@ -362,11 +390,46 @@ async fn cmd_inspect(path: &Path, component: Option<&str>) -> Result<()> {
             "raw_records": doc.raw_records.len(),
             "additional_streams_keys": doc.additional_streams.keys().collect::<Vec<_>>(),
         }),
-        AltiumFile::IntegratedLibrary(intlib) => json!({
-            "schematic_libraries": intlib.schematic_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
-            "footprint_libraries": intlib.footprint_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
-            "additional_files": intlib.additional_files.keys().collect::<Vec<_>>(),
-            "manifest": intlib.manifest.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<std::collections::BTreeMap<_, _>>(),
+        AltiumFile::IntegratedLibrary(intlib) => {
+            // Surface the typed cross-reference table when it parses; fall
+            // back to the raw token stream when the structure doesn't match.
+            let cross_reference = match intlib.cross_reference_table() {
+                Ok(table) => {
+                    let symbols = table.symbols.iter().map(|s| {
+                        serde_json::json!({
+                            "libref": s.libref,
+                            "internal_schlib_path": s.internal_schlib_path,
+                            "description": s.description,
+                            "source_schlib_path": s.source_schlib_path,
+                            "footprints": s.footprints.iter().map(|f| serde_json::json!({
+                                "name": f.name,
+                                "kind": f.kind,
+                                "internal_pcblib_path": f.internal_pcblib_path,
+                                "source_pcblib_path": f.source_pcblib_path,
+                            })).collect::<Vec<_>>(),
+                        })
+                    }).collect::<Vec<_>>();
+                    json!({"symbols": symbols})
+                }
+                Err(e) => json!({ "error": e.to_string() }),
+            };
+            json!({
+                "schematic_libraries": intlib.schematic_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+                "footprint_libraries": intlib.footprint_libraries.iter().map(|e| &e.name).collect::<Vec<_>>(),
+                "additional_files": intlib.additional_files.keys().collect::<Vec<_>>(),
+                "manifest": intlib.manifest.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<std::collections::BTreeMap<_, _>>(),
+                "version": intlib.version,
+                "parameters_blocks": intlib.parameters_blocks().unwrap_or_default(),
+                "cross_reference": cross_reference,
+            })
+        }
+        AltiumFile::LibraryPackage(pkg) => json!({
+            "documents": pkg.documents().iter().map(|d| serde_json::json!({
+                "path": d.document_path,
+                "annotation_enabled": d.annotation_enabled,
+                "annotate_scope": d.annotate_scope,
+            })).collect::<Vec<_>>(),
+            "section_names": pkg.sections.keys().collect::<Vec<_>>(),
         }),
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -458,6 +521,48 @@ async fn cmd_flatten(
     Ok(())
 }
 
+async fn cmd_split(path: &Path, out_dir: &Path, name_override: Option<&str>) -> Result<()> {
+    // Read whatever the user pointed at — IntLib explicitly, or anything else
+    // we can crack open via the unified entry. Only IntLib actually contains
+    // bundled libraries; the others get a clear error.
+    let file = AltiumFile::read(path).await?;
+    let intlib = match file {
+        AltiumFile::IntegratedLibrary(i) => i,
+        other => {
+            return Err(anyhow!(
+                "split only supports .IntLib; got {}",
+                kind_label(&other)
+            ));
+        }
+    };
+
+    let stem = name_override
+        .map(str::to_string)
+        .or_else(|| {
+            path.file_stem()
+                .and_then(|s| s.to_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_else(|| "Library".to_string());
+
+    let result = intlib
+        .split_to_directory(out_dir, &stem)
+        .await
+        .with_context(|| format!("split {} into {}", path.display(), out_dir.display()))?;
+    result.write_package().await.with_context(|| {
+        format!("write {}", result.package_path.display())
+    })?;
+
+    eprintln!("split {} → {}", path.display(), out_dir.display());
+    eprintln!("  {} embedded files written", result.written_files.len());
+    eprintln!("  package: {}", result.package_path.display());
+    for p in &result.written_files {
+        eprintln!("  - {}", p.display());
+    }
+    println!("wrote {}", result.package_path.display());
+    Ok(())
+}
+
 fn kind_label(file: &AltiumFile) -> &'static str {
     match file {
         AltiumFile::PcbLibrary(_) => ".PcbLib",
@@ -465,5 +570,6 @@ fn kind_label(file: &AltiumFile) -> &'static str {
         AltiumFile::PcbDocument(_) => ".PcbDoc",
         AltiumFile::SchDocument(_) => ".SchDoc",
         AltiumFile::IntegratedLibrary(_) => ".IntLib",
+        AltiumFile::LibraryPackage(_) => ".LibPkg",
     }
 }

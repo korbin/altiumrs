@@ -16,6 +16,9 @@
 //!         intlib.schematic_libraries.len(),
 //!         intlib.footprint_libraries.len(),
 //!     ),
+//!     AltiumFile::LibraryPackage(pkg) => {
+//!         println!("LibPkg: {} documents", pkg.documents().len())
+//!     }
 //! }
 //! # Ok(()) }
 //! ```
@@ -26,6 +29,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::error::{Error, Result};
 use crate::intlib::IntegratedLibrary;
+use crate::libpkg::LibraryPackage;
 use crate::{pcb, sch};
 
 /// The kind of Altium file. Matches the five supported on-disk formats.
@@ -41,6 +45,8 @@ pub enum AltiumFileKind {
     SchDocument,
     /// `.IntLib`: compiled integrated library bundling SchLib + PcbLib.
     IntegratedLibrary,
+    /// `.LibPkg`: source library project that compiles to an IntLib.
+    LibraryPackage,
 }
 
 impl AltiumFileKind {
@@ -58,6 +64,8 @@ impl AltiumFileKind {
             Some(Self::SchDocument)
         } else if ext.eq_ignore_ascii_case("intlib") {
             Some(Self::IntegratedLibrary)
+        } else if ext.eq_ignore_ascii_case("libpkg") {
+            Some(Self::LibraryPackage)
         } else {
             None
         }
@@ -80,14 +88,18 @@ impl AltiumFileKind {
             Self::PcbDocument => ".PcbDoc",
             Self::SchDocument => ".SchDoc",
             Self::IntegratedLibrary => ".IntLib",
+            Self::LibraryPackage => ".LibPkg",
         }
     }
 
-    /// `true` for `.PcbLib`, `.SchLib`, and `.IntLib`.
+    /// `true` for `.PcbLib`, `.SchLib`, `.IntLib`, and `.LibPkg`.
     pub fn is_library(self) -> bool {
         matches!(
             self,
-            Self::PcbLibrary | Self::SchLibrary | Self::IntegratedLibrary
+            Self::PcbLibrary
+                | Self::SchLibrary
+                | Self::IntegratedLibrary
+                | Self::LibraryPackage
         )
     }
 
@@ -106,6 +118,7 @@ pub enum AltiumFile {
     PcbDocument(pcb::Document),
     SchDocument(sch::Document),
     IntegratedLibrary(IntegratedLibrary),
+    LibraryPackage(LibraryPackage),
 }
 
 impl AltiumFile {
@@ -132,6 +145,12 @@ impl AltiumFile {
             AltiumFileKind::IntegratedLibrary => {
                 Self::IntegratedLibrary(IntegratedLibrary::from_bytes(bytes)?)
             }
+            AltiumFileKind::LibraryPackage => {
+                let text = String::from_utf8(bytes).map_err(|e| {
+                    Error::Encoding(format!("LibPkg is not valid UTF-8: {e}"))
+                })?;
+                Self::LibraryPackage(LibraryPackage::parse(&text)?)
+            }
         })
     }
 
@@ -153,6 +172,7 @@ impl AltiumFile {
             Self::PcbDocument(doc) => doc.to_bytes(),
             Self::SchDocument(doc) => doc.to_bytes(),
             Self::IntegratedLibrary(lib) => lib.to_bytes(),
+            Self::LibraryPackage(pkg) => Ok(pkg.to_string_crlf().into_bytes()),
         }
     }
 
@@ -172,6 +192,7 @@ impl AltiumFile {
             Self::PcbDocument(_) => AltiumFileKind::PcbDocument,
             Self::SchDocument(_) => AltiumFileKind::SchDocument,
             Self::IntegratedLibrary(_) => AltiumFileKind::IntegratedLibrary,
+            Self::LibraryPackage(_) => AltiumFileKind::LibraryPackage,
         }
     }
 
@@ -205,6 +226,13 @@ impl AltiumFile {
     }
     pub fn as_integrated_library(&self) -> Option<&IntegratedLibrary> {
         if let Self::IntegratedLibrary(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
+    pub fn as_library_package(&self) -> Option<&LibraryPackage> {
+        if let Self::LibraryPackage(v) = self {
             Some(v)
         } else {
             None
@@ -246,6 +274,13 @@ impl AltiumFile {
             None
         }
     }
+    pub fn as_library_package_mut(&mut self) -> Option<&mut LibraryPackage> {
+        if let Self::LibraryPackage(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 
     pub fn into_pcb_library(self) -> Option<pcb::Library> {
         if let Self::PcbLibrary(v) = self {
@@ -282,6 +317,13 @@ impl AltiumFile {
             None
         }
     }
+    pub fn into_library_package(self) -> Option<LibraryPackage> {
+        if let Self::LibraryPackage(v) = self {
+            Some(v)
+        } else {
+            None
+        }
+    }
 }
 
 impl From<pcb::Library> for AltiumFile {
@@ -307,6 +349,11 @@ impl From<sch::Document> for AltiumFile {
 impl From<IntegratedLibrary> for AltiumFile {
     fn from(v: IntegratedLibrary) -> Self {
         Self::IntegratedLibrary(v)
+    }
+}
+impl From<LibraryPackage> for AltiumFile {
+    fn from(v: LibraryPackage) -> Self {
+        Self::LibraryPackage(v)
     }
 }
 
