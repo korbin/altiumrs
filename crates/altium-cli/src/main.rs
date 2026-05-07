@@ -62,6 +62,20 @@ enum Command {
         #[arg(long)]
         search_path: Vec<PathBuf>,
     },
+    /// Extract the netlist from a `.PcbDoc` or `.SchDoc`. PCB extraction is
+    /// explicit (each pad carries its net name); SchDoc extraction traces
+    /// the wire graph and uses net labels / power ports for naming.
+    Netlist {
+        /// Source `.PcbDoc` or `.SchDoc`.
+        path: PathBuf,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output format: `protel` (Altium .NET, default), `kicad`, `json`,
+        /// or `csv`.
+        #[arg(long, default_value = "protel")]
+        format: String,
+    },
     /// Split an `.IntLib` into its constituent source files (`.SchLib`,
     /// `.PcbLib`, datasheets, …) plus a matching `.LibPkg` project file.
     Split {
@@ -108,6 +122,11 @@ async fn main() -> Result<()> {
             out_dir,
             name,
         } => cmd_split(&path, &out_dir, name.as_deref()).await,
+        Command::Netlist {
+            path,
+            output,
+            format,
+        } => cmd_netlist(&path, output.as_deref(), &format).await,
     }
 }
 
@@ -518,6 +537,48 @@ async fn cmd_flatten(
         .await
         .with_context(|| format!("write {}", out_path.display()))?;
     println!("wrote {}", out_path.display());
+    Ok(())
+}
+
+async fn cmd_netlist(
+    path: &Path,
+    output: Option<&Path>,
+    format: &str,
+) -> Result<()> {
+    use altium::Netlist;
+    let file = AltiumFile::read(path).await?;
+    let netlist = match file {
+        AltiumFile::PcbDocument(doc) => Netlist::from_pcb_document(&doc),
+        AltiumFile::SchDocument(doc) => Netlist::from_sch_document(&doc),
+        other => {
+            return Err(anyhow!(
+                "netlist requires .PcbDoc or .SchDoc; got {}",
+                kind_label(&other)
+            ));
+        }
+    };
+
+    let rendered = match format.to_ascii_lowercase().as_str() {
+        "protel" | "altium" | "net" => netlist.to_protel(),
+        "kicad" => netlist.to_kicad(),
+        "json" => netlist.to_json(),
+        "csv" | "tsv" => netlist.to_csv(),
+        other => {
+            return Err(anyhow!(
+                "unknown format {other:?}; expected protel | kicad | json | csv"
+            ));
+        }
+    };
+
+    match output {
+        Some(out) => {
+            tokio::fs::write(out, rendered.as_bytes())
+                .await
+                .with_context(|| format!("write {}", out.display()))?;
+            println!("wrote {}", out.display());
+        }
+        None => print!("{rendered}"),
+    }
     Ok(())
 }
 

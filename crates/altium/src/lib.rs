@@ -14,6 +14,7 @@ pub mod error;
 pub mod file;
 pub mod intlib;
 pub mod libpkg;
+pub mod netlist;
 pub mod parameter;
 pub mod pcb;
 #[cfg(feature = "render")]
@@ -37,5 +38,8 @@ pub use intlib::{
     IntegratedLibrary, NamedLibrary, flatten_cross_reference_table, parse_cross_reference,
     parse_cross_reference_table, parse_parameters_bin, serialise_cross_reference,
     serialise_parameters_bin,
+};
+pub use netlist::{
+    NetConnection, Netlist, NetlistComponent, NetlistNet, NetlistSource,
 };
 pub use libpkg::{DocumentReference, LibraryPackage, SplitResult};
