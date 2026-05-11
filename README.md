@@ -1,20 +1,15 @@
 # altium
 
-Pure-Rust read/write for Altium Designer files: `.SchLib`, `.SchDoc`,
-`.PcbLib`, `.PcbDoc`, `.IntLib`, `.LibPkg`. Round-trips every fixture in
-`testdata/`.
+Pure-Rust read/write for Altium Designer files: `.SchLib`, `.SchDoc`, `.PcbLib`, `.PcbDoc`, `.IntLib`, `.LibPkg`, `.BomDoc`.
 
-PCB has a typed model: build a `PcbLib` / `PcbDoc` from scratch, mutate,
-write. Schematic round-trips by replaying raw records; the typed model
-isn't wired up for from-scratch authoring yet. PNG/SVG render lives behind
-the `render` feature, for both PCB and schematic components.
+PCB has a typed model: build a `PcbLib` / `PcbDoc` from scratch, mutate, write. Schematic round-trips by replaying raw records; the typed model isn't wired up for from-scratch authoring yet. PNG/SVG render lives behind the `render` feature, for both PCB and schematic components.
 
 ## Crates
 
 - `altium`: library.
 - `altium-derive`: `#[derive(AltiumRecord)]`, generates `from_params` /
   `to_params` for record DTOs.
-- `altium-cli`: `altium info | dump | render | inspect | flatten | split`.
+- `altium-cli`: `altium info | dump | render | inspect | flatten | split | netlist | bom`.
 
 ## Usage
 

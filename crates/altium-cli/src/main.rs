@@ -76,6 +76,18 @@ enum Command {
         #[arg(long, default_value = "protel")]
         format: String,
     },
+    /// Export a `.BomDoc` to CSV (default) or JSON. One row per CatalogItem
+    /// with the common BOM columns.
+    Bom {
+        /// Source `.BomDoc`.
+        path: PathBuf,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Output format: `csv` (default) or `json`.
+        #[arg(long, default_value = "csv")]
+        format: String,
+    },
     /// Split an `.IntLib` into its constituent source files (`.SchLib`,
     /// `.PcbLib`, datasheets, …) plus a matching `.LibPkg` project file.
     Split {
@@ -127,6 +139,11 @@ async fn main() -> Result<()> {
             output,
             format,
         } => cmd_netlist(&path, output.as_deref(), &format).await,
+        Command::Bom {
+            path,
+            output,
+            format,
+        } => cmd_bom(&path, output.as_deref(), &format).await,
     }
 }
 
@@ -184,6 +201,18 @@ async fn cmd_info(path: &Path) -> Result<()> {
             "documents": pkg.documents().iter().map(|d| &d.document_path).cloned().collect::<Vec<_>>(),
             "section_names": pkg.sections.keys().collect::<Vec<_>>(),
         }),
+        AltiumFile::BomDocument(doc) => {
+            let header = doc.header();
+            json!({
+                "kind": "BomDoc",
+                "records": doc.records.len(),
+                "items": doc.item_count(),
+                "bom_kind": header.map(|h| h.kind().to_string()),
+                "version": header.and_then(|h| h.version()),
+                "currency": header.map(|h| h.currency().to_string()),
+                "date": header.map(|h| h.date().to_string()),
+            })
+        }
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
@@ -323,6 +352,11 @@ async fn cmd_render(
                 "LibPkg is a project file with no rendered geometry; render the referenced .SchLib / .PcbLib instead"
             ));
         }
+        AltiumFile::BomDocument(_) => {
+            return Err(anyhow!(
+                "BomDoc has no rendered geometry; use `altium bom` to export CSV/JSON instead"
+            ));
+        }
     }
     println!("wrote {}", output.display());
     Ok(())
@@ -449,6 +483,19 @@ async fn cmd_inspect(path: &Path, component: Option<&str>) -> Result<()> {
                 "annotate_scope": d.annotate_scope,
             })).collect::<Vec<_>>(),
             "section_names": pkg.sections.keys().collect::<Vec<_>>(),
+        }),
+        AltiumFile::BomDocument(doc) => json!({
+            "kind": "BomDoc",
+            "records": doc.records.iter().map(|r| r.kind.clone()).collect::<Vec<_>>(),
+            "items": doc.items().map(|it| serde_json::json!({
+                "unique_id": it.unique_id(),
+                "design_item_id": it.design_item_id(),
+                "description": it.description(),
+                "user_comments": it.user_comments(),
+                "footprint": it.footprint(),
+                "manufacturer": it.manufacturer(),
+                "manufacturer_part_number": it.manufacturer_part_number(),
+            })).collect::<Vec<_>>(),
         }),
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
@@ -582,6 +629,128 @@ async fn cmd_netlist(
     Ok(())
 }
 
+async fn cmd_bom(path: &Path, output: Option<&Path>, format: &str) -> Result<()> {
+    use altium::bom::BomDocument;
+    let bytes = tokio::fs::read(path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let doc = BomDocument::from_bytes(bytes)
+        .with_context(|| format!("parse {}", path.display()))?;
+
+    let rendered = match format.to_ascii_lowercase().as_str() {
+        "csv" | "tsv" => bom_to_csv(&doc, format.eq_ignore_ascii_case("tsv")),
+        "json" => bom_to_json(&doc)?,
+        other => {
+            return Err(anyhow!("unknown format {other:?}; expected csv | tsv | json"));
+        }
+    };
+
+    match output {
+        Some(out) => {
+            tokio::fs::write(out, rendered.as_bytes())
+                .await
+                .with_context(|| format!("write {}", out.display()))?;
+            println!("wrote {}", out.display());
+        }
+        None => print!("{rendered}"),
+    }
+    Ok(())
+}
+
+fn bom_to_csv(doc: &altium::bom::BomDocument, tab: bool) -> String {
+    let sep = if tab { '\t' } else { ',' };
+    let headers = [
+        "DesignItemId",
+        "Comment",
+        "Description",
+        "Footprint",
+        "Manufacturer",
+        "Manufacturer Part Number",
+        "Supplier",
+        "Supplier Part Number",
+        "ItemSource",
+        "UniqueId",
+    ];
+    let mut out = String::new();
+    for (i, h) in headers.iter().enumerate() {
+        if i > 0 {
+            out.push(sep);
+        }
+        out.push_str(&csv_field(h, sep));
+    }
+    out.push_str("\r\n");
+    for it in doc.items() {
+        let comment = it.comment().unwrap_or_else(|| it.user_comments().to_string());
+        let row = [
+            it.design_item_id().to_string(),
+            comment,
+            it.description().to_string(),
+            it.footprint().unwrap_or_default(),
+            it.manufacturer().unwrap_or_default(),
+            it.manufacturer_part_number().unwrap_or_default(),
+            it.supplier().unwrap_or_default(),
+            it.supplier_part_number().unwrap_or_default(),
+            it.item_source().to_string(),
+            it.unique_id().to_string(),
+        ];
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                out.push(sep);
+            }
+            out.push_str(&csv_field(cell, sep));
+        }
+        out.push_str("\r\n");
+    }
+    out
+}
+
+fn csv_field(s: &str, sep: char) -> String {
+    let needs_quotes = s.contains(sep) || s.contains('"') || s.contains('\n') || s.contains('\r');
+    if needs_quotes {
+        let escaped = s.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    } else {
+        s.to_string()
+    }
+}
+
+fn bom_to_json(doc: &altium::bom::BomDocument) -> Result<String> {
+    let items: Vec<_> = doc
+        .items()
+        .map(|it| {
+            json!({
+                "unique_id": it.unique_id(),
+                "design_item_id": it.design_item_id(),
+                "item_source": it.item_source(),
+                "description": it.description(),
+                "user_comments": it.user_comments(),
+                "comment": it.comment(),
+                "footprint": it.footprint(),
+                "value": it.value(),
+                "manufacturer": it.manufacturer(),
+                "manufacturer_part_number": it.manufacturer_part_number(),
+                "supplier": it.supplier(),
+                "supplier_part_number": it.supplier_part_number(),
+                "library_reference": it.library_reference(),
+                "component_parameters": it.component_parameters(),
+            })
+        })
+        .collect();
+    let header = doc.header().map(|h| {
+        json!({
+            "version": h.version(),
+            "filename": h.filename(),
+            "kind": h.kind(),
+            "date": h.date(),
+            "time": h.time(),
+            "currency": h.currency(),
+            "production_quantity": h.production_quantity(),
+        })
+    });
+    let value = json!({ "header": header, "items": items });
+    Ok(serde_json::to_string_pretty(&value)?)
+}
+
 async fn cmd_split(path: &Path, out_dir: &Path, name_override: Option<&str>) -> Result<()> {
     // Read whatever the user pointed at — IntLib explicitly, or anything else
     // we can crack open via the unified entry. Only IntLib actually contains
@@ -632,5 +801,6 @@ fn kind_label(file: &AltiumFile) -> &'static str {
         AltiumFile::SchDocument(_) => ".SchDoc",
         AltiumFile::IntegratedLibrary(_) => ".IntLib",
         AltiumFile::LibraryPackage(_) => ".LibPkg",
+        AltiumFile::BomDocument(_) => ".BomDoc",
     }
 }

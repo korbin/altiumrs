@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Read and write Altium Designer files (.SchLib, .SchDoc, .PcbLib, .PcbDoc)"
+description = "Read and write Altium Designer files (.SchLib, .SchDoc, .PcbLib, .PcbDoc, .IntLib, .LibPkg, .BomDoc)"
 
 [features]
 default = []

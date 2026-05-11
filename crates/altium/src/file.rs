@@ -19,6 +19,7 @@
 //!     AltiumFile::LibraryPackage(pkg) => {
 //!         println!("LibPkg: {} documents", pkg.documents().len())
 //!     }
+//!     AltiumFile::BomDocument(doc) => println!("BomDoc: {} items", doc.item_count()),
 //! }
 //! # Ok(()) }
 //! ```
@@ -27,6 +28,7 @@ use std::path::Path;
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+use crate::bom::BomDocument;
 use crate::error::{Error, Result};
 use crate::intlib::IntegratedLibrary;
 use crate::libpkg::LibraryPackage;
@@ -47,6 +49,8 @@ pub enum AltiumFileKind {
     IntegratedLibrary,
     /// `.LibPkg`: source library project that compiles to an IntLib.
     LibraryPackage,
+    /// `.BomDoc`: bill-of-materials document.
+    BomDocument,
 }
 
 impl AltiumFileKind {
@@ -66,6 +70,8 @@ impl AltiumFileKind {
             Some(Self::IntegratedLibrary)
         } else if ext.eq_ignore_ascii_case("libpkg") {
             Some(Self::LibraryPackage)
+        } else if ext.eq_ignore_ascii_case("bomdoc") {
+            Some(Self::BomDocument)
         } else {
             None
         }
@@ -89,6 +95,7 @@ impl AltiumFileKind {
             Self::SchDocument => ".SchDoc",
             Self::IntegratedLibrary => ".IntLib",
             Self::LibraryPackage => ".LibPkg",
+            Self::BomDocument => ".BomDoc",
         }
     }
 
@@ -103,9 +110,12 @@ impl AltiumFileKind {
         )
     }
 
-    /// `true` for `.PcbDoc` and `.SchDoc`.
+    /// `true` for `.PcbDoc`, `.SchDoc`, and `.BomDoc`.
     pub fn is_document(self) -> bool {
-        matches!(self, Self::PcbDocument | Self::SchDocument)
+        matches!(
+            self,
+            Self::PcbDocument | Self::SchDocument | Self::BomDocument
+        )
     }
 }
 
@@ -119,6 +129,7 @@ pub enum AltiumFile {
     SchDocument(sch::Document),
     IntegratedLibrary(IntegratedLibrary),
     LibraryPackage(LibraryPackage),
+    BomDocument(BomDocument),
 }
 
 impl AltiumFile {
@@ -151,6 +162,7 @@ impl AltiumFile {
                 })?;
                 Self::LibraryPackage(LibraryPackage::parse(&text)?)
             }
+            AltiumFileKind::BomDocument => Self::BomDocument(BomDocument::from_bytes(bytes)?),
         })
     }
 
@@ -173,6 +185,7 @@ impl AltiumFile {
             Self::SchDocument(doc) => doc.to_bytes(),
             Self::IntegratedLibrary(lib) => lib.to_bytes(),
             Self::LibraryPackage(pkg) => Ok(pkg.to_string_crlf().into_bytes()),
+            Self::BomDocument(doc) => doc.to_bytes(),
         }
     }
 
@@ -193,6 +206,7 @@ impl AltiumFile {
             Self::SchDocument(_) => AltiumFileKind::SchDocument,
             Self::IntegratedLibrary(_) => AltiumFileKind::IntegratedLibrary,
             Self::LibraryPackage(_) => AltiumFileKind::LibraryPackage,
+            Self::BomDocument(_) => AltiumFileKind::BomDocument,
         }
     }
 

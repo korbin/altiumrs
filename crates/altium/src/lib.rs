@@ -1,8 +1,9 @@
-//! Read and write Altium Designer files (`.SchLib`, `.SchDoc`, `.PcbLib`, `.PcbDoc`).
+//! Read and write Altium Designer files (`.SchLib`, `.SchDoc`, `.PcbLib`, `.PcbDoc`, `.BomDoc`).
 
 extern crate self as altium;
 
 pub mod binary;
+pub mod bom;
 pub mod color;
 pub mod compound;
 pub mod coord;
@@ -23,6 +24,7 @@ pub mod sch;
 
 /// Derives `from_params` / `to_params` on a struct of named fields.
 pub use altium_derive::AltiumRecord;
+pub use bom::{BomDocument, BomHeader, BomItem, BomRecord};
 pub use color::Color;
 pub use coord::{Coord, CoordPoint, CoordRect, ParseCoordError};
 pub use diagnostic::Diagnostic;
