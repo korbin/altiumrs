@@ -669,9 +669,25 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     pad.size_middle = size_middle;
     pad.size_bottom = size_bottom;
     pad.hole_size = hole_size;
-    pad.shape_top = PadShape::try_from(i32::from(shape_top)).unwrap_or(PadShape::Round);
-    pad.shape_middle = PadShape::try_from(i32::from(shape_middle)).unwrap_or(PadShape::Round);
-    pad.shape_bottom = PadShape::try_from(i32::from(shape_bottom)).unwrap_or(PadShape::Round);
+    pad.shape_top = PadShape::from_raw(i32::from(shape_top));
+    pad.shape_middle = PadShape::from_raw(i32::from(shape_middle));
+    pad.shape_bottom = PadShape::from_raw(i32::from(shape_bottom));
+    // Preserve the raw shape bytes so consumers can detect custom /
+    // unmodelled shape values (anything outside {1,2,3,9}). The
+    // `top_shape` / `mid_shape` / `bot_shape` legacy fields are
+    // otherwise default-zero and unused.
+    pad.top_shape = i32::from(shape_top);
+    pad.mid_shape = i32::from(shape_middle);
+    pad.bot_shape = i32::from(shape_bottom);
+    // Mirror size_top into the legacy `top_x_size` / `top_y_size`
+    // so downstream code that prefers the i32-typed fields gets
+    // the right values too.
+    pad.top_x_size = size_top.x;
+    pad.top_y_size = size_top.y;
+    pad.mid_x_size = size_middle.x;
+    pad.mid_y_size = size_middle.y;
+    pad.bot_x_size = size_bottom.x;
+    pad.bot_y_size = size_bottom.y;
     pad.rotation = rotation;
     pad.is_plated = is_plated;
     pad.layer = i32::from(layer);
@@ -710,6 +726,47 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     pad.is_tenting_top = pf.is_tenting_top;
     pad.is_tenting_bottom = pf.is_tenting_bottom;
     pad.is_keepout = pf.is_keepout;
+
+    // Top-layer corner-radius percentage. Altium stores per-layer
+    // values in the SS block's `per_layer_corner_radii` array (0..100,
+    // % of half the smaller side). The legacy `corner_radius_percentage`
+    // global isn't a separate disk field — populate it from the top
+    // slot so consumers (renderer included) can read either source.
+    pad.corner_radius_percentage = i32::from(per_layer_corner_radii[0]);
+
+    // SMD vs through-hole derivation. Altium doesn't store these as
+    // explicit bits; consumers (paste-mask tooling, BOM exporters)
+    // compute them from layer + hole presence. A pad with no drilled
+    // hole on a single signal layer (top = 1, bottom = 32) is SMT.
+    let layer_i32 = i32::from(layer);
+    let has_drill = hole_size.to_raw() > 0;
+    pad.is_surface_mount = !has_drill && matches!(layer_i32, 1 | 32);
+
+    // Paste-mask coverage. Altium opens the paste layer wherever the
+    // pad has copper. Without a "paste disabled" bit in the flags
+    // byte, top-layer pads (1) and multi-layer pads (74) get top
+    // paste; bottom-layer (32) and multi-layer get bottom paste.
+    // Tenting is solder mask, not paste mask — orthogonal.
+    pad.is_top_paste_enabled = matches!(layer_i32, 1 | 74);
+    pad.is_bottom_paste_enabled = matches!(layer_i32, 32 | 74);
+
+    // Per-layer shape overrides. `has_rounded_rect_byte` is the
+    // Altium signal that the SS-block per-layer shape/radius arrays
+    // are authoritative (otherwise the global shape byte applies to
+    // every layer).
+    pad.has_rounded_rectangular_shapes = has_rounded_rect_byte != 0;
+    // Per-layer corner radii diverge → user customised them in the
+    // pad editor (mixed corner radii across the stack).
+    let top_radius = per_layer_corner_radii[0];
+    pad.has_custom_rounded_rectangle = has_rounded_rect_byte != 0
+        && per_layer_corner_radii
+            .iter()
+            .take(32)
+            .any(|&r| r != top_radius);
+    // Shape byte the library doesn't model (anything outside the
+    // canonical {1,2,3,9}) → custom-shape pad whose outline is
+    // typically carried in an associated Region6 record.
+    pad.has_custom_shapes = matches!(pad.shape_top, PadShape::Unknown(_) | PadShape::CustomShape);
 
     Ok(Some(pad))
 }
@@ -1030,13 +1087,163 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
         region.name = Some(v.to_string());
     }
 
+    // Numeric / coord parameters. Region6 stores coords as raw i32
+    // (same convention `read_component_body` uses).
+    if let Some(v) = parameters.get_i32("SUBPOLYINDEX") {
+        region.sub_poly_index = v;
+    }
+    if let Some(v) = parameters.get_i32("UNIONINDEX") {
+        region.union_index = v;
+    }
+    if let Some(v) = parameters.get_f64("ARCRESOLUTION") {
+        region.arc_resolution = v;
+    }
+    if let Some(v) = parameters.get_i32("PASTEMASKEXPANSION") {
+        region.paste_mask_expansion = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("SOLDERMASKEXPANSION") {
+        region.solder_mask_expansion = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("CAVITYHEIGHT") {
+        region.cavity_height = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("POWERPLANECLEARANCE") {
+        region.power_plane_clearance = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("POWERPLANECONNECTSTYLE") {
+        region.power_plane_connect_style = v;
+    }
+    if let Some(v) = parameters.get_i32("POWERPLANERELIEFEXPANSION") {
+        region.power_plane_relief_expansion = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("RELIEFAIRGAP") {
+        region.relief_air_gap = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("RELIEFCONDUCTORWIDTH") {
+        region.relief_conductor_width = Coord::from_raw(v);
+    }
+    if let Some(v) = parameters.get_i32("RELIEFENTRIES") {
+        region.relief_entries = v;
+    }
+    if let Some(v) = parameters.get_i32("HOLECOUNT") {
+        region.hole_count = v;
+    }
+    if let Some(v) = parameters.get_i32("TOTALVERTEXCOUNT") {
+        region.total_vertex_count = v;
+    }
+    if let Some(v) = parameters.get_i64("AREA") {
+        region.area = v;
+    }
+    if let Some(v) = parameters.get_i32("ARCAPPROXIMATION") {
+        region.arc_approximation = Coord::from_raw(v);
+    }
+
+    // Booleans. Altium uses explicit `TRUE`/`FALSE` strings (case
+    // insensitive); absence means "leave default". Several of these
+    // (e.g. `ENABLED`) default to true and only appear in the file
+    // when they're false.
+    if let Some(v) = parameters.get("ISSHAPEBASED") {
+        region.is_shape_based = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ENABLED") {
+        region.enabled = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("USERROUTED") {
+        region.user_routed = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISFREEPRIM") {
+        region.is_free_primitive = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISELECTRICALPRIM") {
+        region.is_electrical_prim = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISPREROUTE") {
+        region.is_pre_route = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("TEARDROP") {
+        region.tear_drop = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("POLYGONOUTLINE") {
+        region.polygon_outline = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISTENTING") {
+        region.is_tenting = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISTESTPOINTTOP") {
+        region.is_testpoint_top = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISTESTPOINTBOTTOM") {
+        region.is_testpoint_bottom = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISASSEMBLYTESTPOINTTOP") {
+        region.is_assy_testpoint_top = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISASSEMBLYTESTPOINTBOTTOM") {
+        region.is_assy_testpoint_bottom = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISHIDDEN") {
+        region.is_hidden = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ALLOWGLOBALEDIT") {
+        region.allow_global_edit = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("MOVEABLE") {
+        region.moveable = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISSIMPLEREGION") {
+        region.is_simple_region = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("VIRTUALCUTOUT") {
+        region.virtual_cutout = v.eq_ignore_ascii_case("TRUE");
+    }
+
     let pf = PrimitiveFlags::decode(flags_bits);
     region.is_locked = pf.is_locked;
     region.is_tenting_top = pf.is_tenting_top;
     region.is_tenting_bottom = pf.is_tenting_bottom;
     region.is_keepout = pf.is_keepout;
 
-    let extra = extract_remaining_parameters(&parameters, &["KIND", "NET", "UNIQUEID", "NAME"]);
+    let consumed_keys = [
+        "KIND",
+        "NET",
+        "UNIQUEID",
+        "NAME",
+        "SUBPOLYINDEX",
+        "UNIONINDEX",
+        "ARCRESOLUTION",
+        "PASTEMASKEXPANSION",
+        "SOLDERMASKEXPANSION",
+        "CAVITYHEIGHT",
+        "POWERPLANECLEARANCE",
+        "POWERPLANECONNECTSTYLE",
+        "POWERPLANERELIEFEXPANSION",
+        "RELIEFAIRGAP",
+        "RELIEFCONDUCTORWIDTH",
+        "RELIEFENTRIES",
+        "HOLECOUNT",
+        "TOTALVERTEXCOUNT",
+        "AREA",
+        "ARCAPPROXIMATION",
+        "ISSHAPEBASED",
+        "ENABLED",
+        "USERROUTED",
+        "ISFREEPRIM",
+        "ISELECTRICALPRIM",
+        "ISPREROUTE",
+        "TEARDROP",
+        "POLYGONOUTLINE",
+        "ISTENTING",
+        "ISTESTPOINTTOP",
+        "ISTESTPOINTBOTTOM",
+        "ISASSEMBLYTESTPOINTTOP",
+        "ISASSEMBLYTESTPOINTBOTTOM",
+        "ISHIDDEN",
+        "ALLOWGLOBALEDIT",
+        "MOVEABLE",
+        "ISSIMPLEREGION",
+        "VIRTUALCUTOUT",
+    ];
+    let extra = extract_remaining_parameters(&parameters, &consumed_keys);
     if !extra.is_empty() {
         region.additional_parameters = Some(extra);
     }

@@ -863,15 +863,145 @@ fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> R
         params.insert("V7_LAYER", layer_byte_to_name(region.layer as u8));
         params.insert("NAME", region.name.clone().unwrap_or_else(|| " ".into()));
         params.insert("KIND", region.kind.to_string());
-        params.insert("SUBPOLYINDEX", "-1");
+        params.insert("SUBPOLYINDEX", region.sub_poly_index.to_string());
         params.insert("UNIONINDEX", region.union_index.to_string());
-        params.insert("ARCRESOLUTION", "0.5mil");
-        params.insert("ISSHAPEBASED", "FALSE");
+        params.insert(
+            "ARCRESOLUTION",
+            format!(
+                "{}mil",
+                if region.arc_resolution == 0.0 {
+                    0.5
+                } else {
+                    region.arc_resolution
+                }
+            ),
+        );
+        params.insert(
+            "ISSHAPEBASED",
+            if region.is_shape_based { "TRUE" } else { "FALSE" },
+        );
         if let Some(net) = &region.net {
             params.insert("NET", net.clone());
         }
         if let Some(uid) = &region.unique_id {
             params.insert("UNIQUEID", uid.clone());
+        }
+        // Mask/relief/power-plane numeric parameters: only emit when
+        // the field is non-default so we don't pollute regions that
+        // never carried them in the source file.
+        if region.paste_mask_expansion.to_raw() != 0 {
+            params.insert(
+                "PASTEMASKEXPANSION",
+                region.paste_mask_expansion.to_raw().to_string(),
+            );
+        }
+        if region.solder_mask_expansion.to_raw() != 0 {
+            params.insert(
+                "SOLDERMASKEXPANSION",
+                region.solder_mask_expansion.to_raw().to_string(),
+            );
+        }
+        if region.cavity_height.to_raw() != 0 {
+            params.insert("CAVITYHEIGHT", region.cavity_height.to_raw().to_string());
+        }
+        if region.power_plane_clearance.to_raw() != 0 {
+            params.insert(
+                "POWERPLANECLEARANCE",
+                region.power_plane_clearance.to_raw().to_string(),
+            );
+        }
+        if region.power_plane_connect_style != 0 {
+            params.insert(
+                "POWERPLANECONNECTSTYLE",
+                region.power_plane_connect_style.to_string(),
+            );
+        }
+        if region.power_plane_relief_expansion.to_raw() != 0 {
+            params.insert(
+                "POWERPLANERELIEFEXPANSION",
+                region.power_plane_relief_expansion.to_raw().to_string(),
+            );
+        }
+        if region.relief_air_gap.to_raw() != 0 {
+            params.insert("RELIEFAIRGAP", region.relief_air_gap.to_raw().to_string());
+        }
+        if region.relief_conductor_width.to_raw() != 0 {
+            params.insert(
+                "RELIEFCONDUCTORWIDTH",
+                region.relief_conductor_width.to_raw().to_string(),
+            );
+        }
+        if region.relief_entries != 0 {
+            params.insert("RELIEFENTRIES", region.relief_entries.to_string());
+        }
+        if region.hole_count != 0 {
+            params.insert("HOLECOUNT", region.hole_count.to_string());
+        }
+        if region.total_vertex_count != 0 {
+            params.insert("TOTALVERTEXCOUNT", region.total_vertex_count.to_string());
+        }
+        if region.area != 0 {
+            params.insert("AREA", region.area.to_string());
+        }
+        if region.arc_approximation.to_raw() != 0 {
+            params.insert(
+                "ARCAPPROXIMATION",
+                region.arc_approximation.to_raw().to_string(),
+            );
+        }
+        // Booleans: `enabled` defaults to true, so emit only when false
+        // (matches the "absent means default" file convention). The
+        // rest default to false and emit only when true.
+        if !region.enabled {
+            params.insert("ENABLED", "FALSE");
+        }
+        if region.user_routed {
+            params.insert("USERROUTED", "TRUE");
+        }
+        if region.is_free_primitive {
+            params.insert("ISFREEPRIM", "TRUE");
+        }
+        if region.is_electrical_prim {
+            params.insert("ISELECTRICALPRIM", "TRUE");
+        }
+        if region.is_pre_route {
+            params.insert("ISPREROUTE", "TRUE");
+        }
+        if region.tear_drop {
+            params.insert("TEARDROP", "TRUE");
+        }
+        if region.polygon_outline {
+            params.insert("POLYGONOUTLINE", "TRUE");
+        }
+        if region.is_tenting {
+            params.insert("ISTENTING", "TRUE");
+        }
+        if region.is_testpoint_top {
+            params.insert("ISTESTPOINTTOP", "TRUE");
+        }
+        if region.is_testpoint_bottom {
+            params.insert("ISTESTPOINTBOTTOM", "TRUE");
+        }
+        if region.is_assy_testpoint_top {
+            params.insert("ISASSEMBLYTESTPOINTTOP", "TRUE");
+        }
+        if region.is_assy_testpoint_bottom {
+            params.insert("ISASSEMBLYTESTPOINTBOTTOM", "TRUE");
+        }
+        if region.is_hidden {
+            params.insert("ISHIDDEN", "TRUE");
+        }
+        if region.allow_global_edit {
+            params.insert("ALLOWGLOBALEDIT", "TRUE");
+        }
+        if region.moveable {
+            params.insert("MOVEABLE", "TRUE");
+        }
+        if region.is_simple_region {
+            params.insert("ISSIMPLEREGION", "TRUE");
+        }
+        if region.virtual_cutout {
+            params.insert("VIRTUALCUTOUT", "TRUE");
         }
         if let Some(extra) = &region.additional_parameters {
             for (k, v) in extra {

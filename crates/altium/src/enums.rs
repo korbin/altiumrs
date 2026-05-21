@@ -106,13 +106,96 @@ repr_enum! {
     }
 }
 
-repr_enum! {
-    /// Copper pad outline shape.
-    pub enum PadShape {
-        Round = 1,
-        Rectangular = 2,
-        Octagonal = 3,
-        RoundedRectangle = 9,
+/// Copper pad outline shape.
+///
+/// Numeric values match Altium's on-disk shape byte for the four known
+/// variants (1/2/3/9). Unrecognised bytes round-trip through
+/// [`PadShape::Unknown`] rather than being silently mapped to `Round`.
+///
+/// `ChamferedRectangle` and `CustomShape` aren't standalone shape bytes —
+/// Altium signals them via boolean flags on the pad record
+/// (`has_corner_radius_chamfer` / `has_custom_chamfered_rectangle` for the
+/// first, `has_custom_shapes` for the second). They surface as logical
+/// variants so consumers can pattern-match on shape semantically; the
+/// reader promotes a base byte + flag combination into the right variant,
+/// and [`PadShape::to_i32`] folds them back to their on-disk base byte for
+/// writing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum PadShape {
+    /// Default / unset (raw byte 0).
+    NoShape,
+    /// Round / oval / ellipse (raw byte 1).
+    Round,
+    /// Rectangular (raw byte 2).
+    Rectangular,
+    /// Octagonal (raw byte 3).
+    Octagonal,
+    /// Rounded rectangle (raw byte 9). Corner radius lives in
+    /// `corner_radius_percentage` or `per_layer_corner_radii`.
+    RoundedRectangle,
+    /// Rounded rectangle whose corners are chamfered (cut at 45°) instead
+    /// of filleted. Shares the on-disk byte with `RoundedRectangle`; the
+    /// distinction comes from the pad's chamfer flags.
+    ChamferedRectangle,
+    /// Free-form outline whose vertices live in an associated `Region6`
+    /// record. Altium writes a placeholder pad (typically `Round`) and
+    /// the actual shape comes from the linked region.
+    CustomShape,
+    /// Raw shape byte that doesn't match any known variant — preserved
+    /// verbatim so it round-trips through the writer.
+    Unknown(i32),
+}
+
+impl PadShape {
+    /// Map a raw on-disk shape byte (as i32) to a variant. Bytes outside
+    /// the known set become [`PadShape::Unknown`] rather than silently
+    /// collapsing to `Round`.
+    pub fn from_raw(value: i32) -> Self {
+        match value {
+            0 => Self::NoShape,
+            1 => Self::Round,
+            2 => Self::Rectangular,
+            3 => Self::Octagonal,
+            9 => Self::RoundedRectangle,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// On-disk shape byte for this variant. `ChamferedRectangle` writes
+    /// the `RoundedRectangle` byte (chamfered-ness lives in the pad's
+    /// flag fields); `CustomShape` writes the `Round` byte (Altium's
+    /// placeholder convention).
+    pub fn to_i32(self) -> i32 {
+        match self {
+            Self::NoShape => 0,
+            Self::Round => 1,
+            Self::Rectangular => 2,
+            Self::Octagonal => 3,
+            Self::RoundedRectangle => 9,
+            Self::ChamferedRectangle => 9,
+            Self::CustomShape => 1,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
+impl Default for PadShape {
+    fn default() -> Self {
+        Self::Round
+    }
+}
+
+impl From<PadShape> for i32 {
+    fn from(shape: PadShape) -> i32 {
+        shape.to_i32()
+    }
+}
+
+impl TryFrom<i32> for PadShape {
+    type Error = core::convert::Infallible;
+    fn try_from(value: i32) -> Result<Self, Self::Error> {
+        Ok(Self::from_raw(value))
     }
 }
 
@@ -215,7 +298,10 @@ mod tests {
 
     #[test]
     fn unknown_value_is_err() {
-        assert_eq!(PadShape::try_from(99), Err(99));
+        // `PadShape` no longer errors on unknown bytes — it preserves them
+        // via the `Unknown` variant so they round-trip through the writer.
+        assert_eq!(PadShape::from_raw(99), PadShape::Unknown(99));
+        assert_eq!(i32::from(PadShape::Unknown(99)), 99);
         assert_eq!(LineStyle::try_from(-1), Err(-1));
     }
 

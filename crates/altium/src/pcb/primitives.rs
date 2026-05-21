@@ -750,6 +750,16 @@ pub struct Region {
     pub cavity_height: Coord,
     pub user_routed: bool,
     pub union_index: i32,
+    /// `-1` for standalone regions; `>=0` is the sub-polygon ordinal
+    /// inside a parent polygon-pour decomposition.
+    pub sub_poly_index: i32,
+    /// `TRUE` when the region is the geometry of a custom-shape pad;
+    /// distinguishes shape-based regions from polygon-pour fragments
+    /// and auto-generated teardrop / track-widening regions.
+    pub is_shape_based: bool,
+    /// Arc-approximation resolution carried in the Region6 record
+    /// (typically 0.5 mil). Kept so writer output round-trips.
+    pub arc_resolution: f64,
     pub is_free_primitive: bool,
     pub is_electrical_prim: bool,
     pub is_pre_route: bool,
@@ -800,6 +810,9 @@ impl Default for Region {
             cavity_height: Coord::ZERO,
             user_routed: false,
             union_index: 0,
+            sub_poly_index: -1,
+            is_shape_based: false,
+            arc_resolution: 0.5,
             is_free_primitive: false,
             is_electrical_prim: false,
             is_pre_route: false,

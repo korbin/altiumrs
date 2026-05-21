@@ -126,6 +126,15 @@ fn draw_pad<C: RenderContext>(ctx: &mut C, t: &CoordTransform, pad: &Pad, draw_d
     }
     let (px, py) = if needs_rotation { (0.0, 0.0) } else { (cx, cy) };
 
+    // Rounded-rectangle / chamfered-rectangle corner radius is
+    // `corner_radius_percentage` % of half the smaller side. The reader
+    // populates this from the SS block's per-layer corner-radius array
+    // (top-layer slot), so it's authoritative for file-loaded pads. For
+    // builder-constructed pads it's the default 50.
+    let rr_radius = {
+        let pct = pad.corner_radius_percentage.clamp(0, 100) as f64 / 100.0;
+        (w.min(h) / 2.0) * pct
+    };
     match pad.shape_top {
         PadShape::Round => {
             // "Round" in Altium = ellipse / oval / circle depending on aspect ratio.
@@ -139,21 +148,52 @@ fn draw_pad<C: RenderContext>(ctx: &mut C, t: &CoordTransform, pad: &Pad, draw_d
             ctx.polygon(&pts, 0.0, None, Some(color));
         }
         PadShape::RoundedRectangle => {
-            // Rounded rectangle: corner radius = corner_radius_percentage % of
-            // half the smaller dimension.
-            let pct = pad.corner_radius_percentage.clamp(0, 100) as f64 / 100.0;
-            let r = (w.min(h) / 2.0) * pct;
             ctx.rounded_rectangle(
                 px - w / 2.0,
                 py - h / 2.0,
                 w,
                 h,
-                r,
-                r,
+                rr_radius,
+                rr_radius,
                 0.0,
                 None,
                 Some(color),
             );
+        }
+        PadShape::ChamferedRectangle => {
+            // Octagon with chamfer cut = corner-radius percentage of
+            // half the smaller side. Falls back to a plain rectangle
+            // when the chamfer would be zero.
+            if rr_radius <= 0.0 {
+                ctx.rectangle(px - w / 2.0, py - h / 2.0, w, h, 0.0, None, Some(color));
+            } else {
+                let cut = rr_radius.min(w.min(h) / 2.0);
+                let half_w = w / 2.0;
+                let half_h = h / 2.0;
+                let pts = [
+                    (px - half_w + cut, py - half_h),
+                    (px + half_w - cut, py - half_h),
+                    (px + half_w, py - half_h + cut),
+                    (px + half_w, py + half_h - cut),
+                    (px + half_w - cut, py + half_h),
+                    (px - half_w + cut, py + half_h),
+                    (px - half_w, py + half_h - cut),
+                    (px - half_w, py - half_h + cut),
+                ];
+                ctx.polygon(&pts, 0.0, None, Some(color));
+            }
+        }
+        PadShape::CustomShape => {
+            // Outline lives in an associated Region6; without a back-
+            // reference here, drawing the bbox is the best we can do
+            // and still keeps the pad visible / hit-testable.
+            ctx.rectangle(px - w / 2.0, py - h / 2.0, w, h, 0.0, None, Some(color));
+        }
+        PadShape::NoShape | PadShape::Unknown(_) => {
+            // Unmodelled shape byte — render the bbox so the pad is at
+            // least visible, rather than silently downgrading to an
+            // ellipse (the pre-fix behaviour).
+            ctx.rectangle(px - w / 2.0, py - h / 2.0, w, h, 0.0, None, Some(color));
         }
     }
 

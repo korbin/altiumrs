@@ -83,6 +83,10 @@ fn pad_shape_variants_render() {
         PadShape::Rectangular,
         PadShape::Octagonal,
         PadShape::RoundedRectangle,
+        PadShape::ChamferedRectangle,
+        PadShape::CustomShape,
+        PadShape::NoShape,
+        PadShape::Unknown(42),
     ] {
         let mut pad = pcb::Pad::default();
         pad.location = CoordPoint::new(Coord::ZERO, Coord::ZERO);
@@ -103,6 +107,17 @@ fn pad_shape_variants_render() {
             PadShape::Rectangular => assert!(svg.contains("<rect"), "rect → rect"),
             PadShape::Octagonal => assert!(svg.contains("<polygon"), "oct → polygon"),
             PadShape::RoundedRectangle => assert!(svg.contains("rx="), "rounded → rect with rx"),
+            // Chamfered rect with non-zero radius draws as an 8-sided polygon
+            // (octagon-like with cut corners).
+            PadShape::ChamferedRectangle => {
+                assert!(svg.contains("<polygon"), "chamfered → polygon")
+            }
+            // Custom-shape, NoShape and Unknown all fall back to a plain bbox
+            // rectangle so the pad stays visible instead of silently
+            // collapsing to a wrong shape.
+            PadShape::CustomShape | PadShape::NoShape | PadShape::Unknown(_) => {
+                assert!(svg.contains("<rect"), "fallback → rect")
+            }
         }
     }
 }

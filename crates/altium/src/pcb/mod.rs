@@ -8,6 +8,7 @@ pub mod doc_codec;
 pub mod document;
 pub mod embedded;
 pub(crate) mod flatten;
+pub mod geometry;
 pub mod layer;
 pub mod library;
 pub mod model3d;
@@ -19,7 +20,8 @@ pub mod writer;
 
 pub use builders::{ArcBuilder, PadBuilder, TrackBuilder, ViaBuilder};
 pub use component::Component;
-pub use document::Document;
+pub use document::{CustomShapePad, Document};
+pub use geometry::offset_polygon;
 pub use embedded::{BoardLoader, EmbeddedBoard, FileBoardLoader};
 pub use layer::{LayerEntry, LayerStack};
 pub use library::Library;

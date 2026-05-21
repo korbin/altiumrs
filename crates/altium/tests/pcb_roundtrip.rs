@@ -308,6 +308,17 @@ fn pcbdoc_typed_storages_populate() {
     let mut total_classes = 0;
     let mut total_nets = 0;
     let mut total_assigned_pads = 0;
+    let mut total_regions = 0;
+    let mut regions_with_subpoly_set = 0;
+    let mut regions_with_shape_based = 0;
+    let mut regions_with_arc_resolution = 0;
+    let mut total_pads = 0;
+    let mut smt_pads = 0;
+    let mut pads_with_top_paste = 0;
+    let mut pads_with_bottom_paste = 0;
+    let mut pads_with_nonzero_corner_radius = 0;
+    let mut pads_with_custom_shapes = 0;
+    let mut pads_with_per_layer_rect = 0;
     for path in files {
         let bytes = fs::read(&path).unwrap();
         let doc = pcb::Document::from_bytes(bytes).unwrap();
@@ -317,6 +328,41 @@ fn pcbdoc_typed_storages_populate() {
         total_classes += doc.classes.len();
         total_nets += doc.nets.len();
         total_assigned_pads += doc.components.iter().map(|c| c.pads.len()).sum::<usize>();
+        for r in doc.regions.iter().chain(doc.components.iter().flat_map(|c| c.regions.iter())) {
+            total_regions += 1;
+            // SUBPOLYINDEX = -1 is the standalone-region default; any other
+            // value means we actually parsed it off disk.
+            if r.sub_poly_index != -1 {
+                regions_with_subpoly_set += 1;
+            }
+            if r.is_shape_based {
+                regions_with_shape_based += 1;
+            }
+            if r.arc_resolution != 0.5 && r.arc_resolution != 0.0 {
+                regions_with_arc_resolution += 1;
+            }
+        }
+        for p in doc.pads.iter().chain(doc.components.iter().flat_map(|c| c.pads.iter())) {
+            total_pads += 1;
+            if p.is_surface_mount {
+                smt_pads += 1;
+            }
+            if p.is_top_paste_enabled {
+                pads_with_top_paste += 1;
+            }
+            if p.is_bottom_paste_enabled {
+                pads_with_bottom_paste += 1;
+            }
+            if p.corner_radius_percentage != 0 && p.corner_radius_percentage != 50 {
+                pads_with_nonzero_corner_radius += 1;
+            }
+            if p.has_custom_shapes {
+                pads_with_custom_shapes += 1;
+            }
+            if p.has_rounded_rectangular_shapes {
+                pads_with_per_layer_rect += 1;
+            }
+        }
     }
     assert!(total_components > 0, "no Components6 records parsed");
     assert!(total_polygons > 0, "no Polygons6 records parsed");
@@ -326,6 +372,39 @@ fn pcbdoc_typed_storages_populate() {
     assert!(
         total_assigned_pads > 0,
         "no pads were assigned to components by component_index"
+    );
+    // Stat-only — useful as a regression signal but not a hard
+    // requirement (testdata mix changes over time).
+    eprintln!(
+        "regions: {} total, {} with subpoly!=-1, {} shape-based, {} non-default arc_resolution",
+        total_regions,
+        regions_with_subpoly_set,
+        regions_with_shape_based,
+        regions_with_arc_resolution,
+    );
+    eprintln!(
+        "pads: {} total, {} SMT, {} top-paste, {} bottom-paste, \
+         {} non-default corner radius, {} custom shape, {} per-layer rectangle",
+        total_pads,
+        smt_pads,
+        pads_with_top_paste,
+        pads_with_bottom_paste,
+        pads_with_nonzero_corner_radius,
+        pads_with_custom_shapes,
+        pads_with_per_layer_rect,
+    );
+    // Hard floor: testdata contains SMT pads and pads on the top and
+    // bottom signal layers (or through-hole pads that span both). If
+    // any of these counters go to zero, the reader regressed on flag
+    // derivation.
+    assert!(smt_pads > 0, "no SMT pads detected — flag derivation regression");
+    assert!(
+        pads_with_top_paste > 0,
+        "no top-paste pads detected — flag derivation regression"
+    );
+    assert!(
+        pads_with_bottom_paste > 0,
+        "no bottom-paste pads detected — flag derivation regression"
     );
 }
 
@@ -688,4 +767,55 @@ async fn embedded_board_resolution_fails_cleanly_when_sibling_missing() {
         "expected a 'not found' error mentioning the missing sibling, got: {msg}"
     );
     let _ = std::fs::remove_dir(&empty);
+}
+
+#[test]
+fn custom_shape_pads_pair_against_real_files() {
+    // At least one .PcbDoc in the testdata corpus carries shape-based
+    // regions paired with placeholder pads (these are custom-shape EPs
+    // — e.g. the thermal pad on a QFN). The pairing API has to return
+    // at least one pair, and every pair has to be self-consistent:
+    // same layer, same component_index, pad location inside region bbox.
+    let Some(dir) = testdata_dir() else {
+        return;
+    };
+    let files = collect_with_extension(&dir, "pcbdoc");
+    if files.is_empty() {
+        return;
+    }
+    let mut total_pairs = 0;
+    for path in files {
+        let bytes = fs::read(&path).unwrap();
+        let doc = pcb::Document::from_bytes(bytes).unwrap();
+        let pairs = doc.custom_shape_pads();
+        for csp in &pairs {
+            assert_eq!(
+                csp.pad.layer, csp.region.layer,
+                "pad/region layer mismatch in {}",
+                path.display()
+            );
+            assert_eq!(
+                csp.pad.component_index, csp.region.component_index,
+                "pad/region component mismatch in {}",
+                path.display()
+            );
+            assert!(
+                csp.region.bounds().contains(csp.pad.location),
+                "pad centroid outside region bbox in {}",
+                path.display()
+            );
+            assert!(
+                csp.region.is_shape_based,
+                "non-shape-based region returned in {}",
+                path.display()
+            );
+        }
+        total_pairs += pairs.len();
+    }
+    eprintln!("custom-shape pad/region pairs across testdata: {total_pairs}");
+    assert!(
+        total_pairs > 0,
+        "no custom-shape pad/region pairs found across testdata — \
+         either the matcher regressed or the testdata changed"
+    );
 }

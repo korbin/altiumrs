@@ -16,6 +16,17 @@ use crate::coord::CoordRect;
 use crate::diagnostic::Diagnostic;
 use crate::error::Result;
 
+/// A pad-shaped-region pair representing one custom-shape EP.
+///
+/// Returned by [`Document::custom_shape_pads`]. The pad carries the
+/// metadata Altium tracks on `Pad6` (designator, net, rotation); the
+/// region carries the actual polygon outline.
+#[derive(Debug, Clone, Copy)]
+pub struct CustomShapePad<'a> {
+    pub pad: &'a Pad,
+    pub region: &'a Region,
+}
+
 /// A PCB document.
 #[derive(Debug, Clone, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -81,6 +92,66 @@ impl Document {
             acc = acc.union(r.bounds());
         }
         acc
+    }
+
+    /// Pair custom-shape pads (placeholder `Pad6` records) with the
+    /// `Region6` outlines that carry their actual geometry.
+    ///
+    /// Altium emits a custom-shape EP as two records: a `Pad6` that
+    /// carries designator / net / rotation, and a `Region6` on the same
+    /// copper layer with `ISSHAPEBASED=TRUE` and `SUBPOLYINDEX=-1` that
+    /// carries the polygon outline. Pairing matches a shape-based
+    /// region to a pad by (1) matching `component_index`, (2) matching
+    /// `layer`, and (3) the pad's location falling inside the region's
+    /// bounding box.
+    ///
+    /// The result includes regions parented to components (libraries
+    /// keep regions inside `Component`, documents keep them at the top
+    /// level — both are searched).
+    ///
+    /// Unmatched shape-based regions are dropped silently; the caller
+    /// usually wants only the (pad, region) pairs for downstream
+    /// rendering or paste-mask derivation.
+    pub fn custom_shape_pads(&self) -> Vec<CustomShapePad<'_>> {
+        let mut out: Vec<CustomShapePad<'_>> = Vec::new();
+        let candidate_pads: Vec<&Pad> = self
+            .pads
+            .iter()
+            .chain(self.components.iter().flat_map(|c| c.pads.iter()))
+            .collect();
+        let candidate_regions = self
+            .regions
+            .iter()
+            .chain(self.components.iter().flat_map(|c| c.regions.iter()));
+
+        for region in candidate_regions {
+            if !region.is_shape_based || region.sub_poly_index != -1 {
+                continue;
+            }
+            let bbox = region.bounds();
+            if bbox.is_empty() {
+                continue;
+            }
+            let matched = candidate_pads.iter().find(|pad| {
+                pad.component_index == region.component_index
+                    && pad.layer == region.layer
+                    && bbox.contains(pad.location)
+            });
+            if let Some(pad) = matched {
+                // Cheap de-dup: the same Pad shows up in both `doc.pads`
+                // and `component.pads` (the reader pushes a clone), so
+                // skip if we've already paired this pad pointer.
+                let pad_ptr = (*pad) as *const Pad;
+                if out
+                    .iter()
+                    .any(|existing| std::ptr::eq(existing.pad, pad_ptr))
+                {
+                    continue;
+                }
+                out.push(CustomShapePad { pad, region });
+            }
+        }
+        out
     }
 
     /// Resolve every entry in [`embedded_boards`](Self::embedded_boards) by
