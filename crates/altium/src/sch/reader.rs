@@ -85,8 +85,18 @@ impl Library {
 }
 
 fn section_key_from_name(name: &str) -> String {
-    let trimmed = if name.len() > 31 { &name[..31] } else { name };
-    trimmed.replace('/', "_")
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '!' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+    if sanitized.len() > 31 {
+        sanitized.chars().take(31).collect()
+    } else {
+        sanitized
+    }
 }
 
 fn read_file_header(cf: &mut CompoundFile, library: &mut Library) -> Result<Vec<String>> {

@@ -24,17 +24,30 @@ impl Library {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut cf = CompoundFile::create()?;
 
+        // Resolve a storage section key for each component, honoring any
+        // explicit overrides in `self.section_keys` and otherwise deriving
+        // one from the component name (sanitizing illegal OLE / Altium chars).
+        let mut effective_section_keys: BTreeMap<String, String> = self.section_keys.clone();
+        for component in &self.components {
+            if effective_section_keys.contains_key(&component.name) {
+                continue;
+            }
+            let derived = section_key_from_name(&component.name);
+            if derived != component.name {
+                effective_section_keys.insert(component.name.clone(), derived);
+            }
+        }
+
         write_file_header(&mut cf, self)?;
-        if !self.section_keys.is_empty() {
-            write_section_keys(&mut cf, &self.section_keys)?;
+        if !effective_section_keys.is_empty() {
+            write_section_keys(&mut cf, &effective_section_keys)?;
         }
 
         for component in &self.components {
-            let section_key = self
-                .section_keys
+            let section_key = effective_section_keys
                 .get(&component.name)
                 .cloned()
-                .unwrap_or_else(|| section_key_from_name(&component.name));
+                .unwrap_or_else(|| component.name.clone());
             write_component(&mut cf, component, &section_key)?;
         }
 
@@ -66,8 +79,21 @@ impl Library {
 }
 
 fn section_key_from_name(name: &str) -> String {
-    let trimmed = if name.len() > 31 { &name[..31] } else { name };
-    trimmed.replace('/', "_")
+    // OLE compound files and Altium itself reject several characters in
+    // storage stream names. Replace any of `/ \ : ! * ? " < > |` with `_`
+    // before truncating to the 31-char OLE limit.
+    let sanitized: String = name
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' | '!' | '*' | '?' | '"' | '<' | '>' | '|' => '_',
+            _ => c,
+        })
+        .collect();
+    if sanitized.len() > 31 {
+        sanitized.chars().take(31).collect()
+    } else {
+        sanitized
+    }
 }
 
 fn write_file_header(cf: &mut CompoundFile, library: &Library) -> Result<()> {
