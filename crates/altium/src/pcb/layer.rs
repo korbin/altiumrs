@@ -1,7 +1,5 @@
 //! PCB layer-stack data parsed from the `Board6` parameter dictionary.
 
-use std::collections::BTreeMap;
-
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -30,43 +28,45 @@ pub struct LayerStack {
 }
 
 impl LayerStack {
-    /// Build a stack by scanning a `Board6` parameter map for `V7_LAYERnNAME`
-    /// keys and following the previous/next chain.
-    pub fn from_board_parameters(parameters: &BTreeMap<String, String>) -> Option<Self> {
+    /// Build a stack by scanning `V7_LAYERnNAME` keys and following the
+    /// previous/next chain. Duplicate keys are last-write-wins.
+    pub fn from_board_parameters(parameters: &[(String, String)]) -> Option<Self> {
+        let mut lookup: std::collections::HashMap<&str, &str> =
+            std::collections::HashMap::new();
+        for (k, v) in parameters {
+            lookup.insert(k.as_str(), v.as_str());
+        }
         let mut entries = std::collections::BTreeMap::<i32, LayerEntry>::new();
         for i in 1..=100 {
             let key_name = format!("V7_LAYER{i}NAME");
-            let Some(name) = parameters.get(&key_name) else {
+            let Some(&name) = lookup.get(key_name.as_str()) else {
                 continue;
             };
             let mut entry = LayerEntry {
                 index: i,
-                name: name.clone(),
+                name: name.to_string(),
                 ..LayerEntry::default()
             };
-            if let Some(prev) = parameters
-                .get(&format!("V7_LAYER{i}PREV"))
-                .and_then(|s| s.parse().ok())
-            {
-                entry.previous_index = prev;
+            if let Some(&prev) = lookup.get(format!("V7_LAYER{i}PREV").as_str()) {
+                if let Ok(v) = prev.parse() {
+                    entry.previous_index = v;
+                }
             }
-            if let Some(next) = parameters
-                .get(&format!("V7_LAYER{i}NEXT"))
-                .and_then(|s| s.parse().ok())
-            {
-                entry.next_index = next;
+            if let Some(&next) = lookup.get(format!("V7_LAYER{i}NEXT").as_str()) {
+                if let Ok(v) = next.parse() {
+                    entry.next_index = v;
+                }
             }
-            if let Some(cop) = parameters.get(&format!("V7_LAYER{i}COPTHICK")) {
+            if let Some(&cop) = lookup.get(format!("V7_LAYER{i}COPTHICK").as_str()) {
                 entry.copper_enabled = cop != "0";
             }
-            if let Some(diel) = parameters.get(&format!("V7_LAYER{i}DIELTYPE")) {
-                entry.dielectric_material = diel.clone();
+            if let Some(&diel) = lookup.get(format!("V7_LAYER{i}DIELTYPE").as_str()) {
+                entry.dielectric_material = diel.to_string();
             }
-            if let Some(color) = parameters
-                .get(&format!("V7_LAYER{i}COLOR"))
-                .and_then(|s| s.parse().ok())
-            {
-                entry.color = color;
+            if let Some(&color) = lookup.get(format!("V7_LAYER{i}COLOR").as_str()) {
+                if let Ok(v) = color.parse() {
+                    entry.color = v;
+                }
             }
             entries.insert(i, entry);
         }

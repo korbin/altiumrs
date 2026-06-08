@@ -31,9 +31,14 @@ impl CompoundFile {
         Ok(Self { inner })
     }
 
-    /// Create a fresh, empty compound file.
+    /// Create a fresh, empty compound file. Emits CFB v3 (512-byte sectors);
+    /// Altium's PcbDoc / SchDoc loaders don't accept v4.
     pub fn create() -> Result<Self> {
-        let inner = cfb::CompoundFile::create(Cursor::new(Vec::new())).map_err(map_cfb_err)?;
+        let inner = cfb::CompoundFile::create_with_version(
+            cfb::Version::V3,
+            Cursor::new(Vec::new()),
+        )
+        .map_err(map_cfb_err)?;
         Ok(Self { inner })
     }
 

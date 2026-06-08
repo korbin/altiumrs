@@ -498,38 +498,43 @@ fn default_pad_via_library_data() -> Vec<u8> {
 }
 
 fn default_file_version_info_data() -> Vec<u8> {
+    // Migration-history list ending at Release 20.0. An outdated terminal
+    // entry triggers Altium's "File in Newer Format" report on every open.
     const ENTRIES: &[(&str, &str, &str)] = &[
-        (
-            "Winter 09",
-            "",
-            "<b>CAUTION</b> - Vias support varying diameters across layerstack. \
-             If this feature is used in design, extra values will be discarded.",
-        ),
-        (
-            "Winter 09",
-            "",
-            "<b>CAUTION</b> - File may contain pads with hole offsets. \
-             Hole offset information will be discarded.",
-        ),
-        (
-            "Winter 09",
-            "",
-            "<b>CAUTION</b> - 3D models now support texturing.\
-             If used in design these textures will be discarded.",
-        ),
-        (
-            "Summer 09",
-            "",
-            "<b>CAUTION</b> - Support was added for 32 Mechanical Layers. \
-             Objects on mechanical layers beyond 16 have been moved to Mechanical Layer 16.",
-        ),
-        (
-            "Release 10",
-            "",
-            "<b>CAUTION</b> - New Custom Grids and Guides were introduced. \
-             Be aware that your design might contain Custom Grids and Guides \
-             that cannot be read in previous versions. ",
-        ),
+        ("6.3", "<b>CAUTION</b> - Via connections to both hatched and solid signal layer polygons are now controlled by the polygon connect style rule. Re-pouring polygons may result in physical copper differences.", ""),
+        ("6.6", "", "<b>CAUTION</b> - File contains Rounded Rectangular pads not supported by this version of the software. These pads have been converted to the Round shape."),
+        ("6.8", "", "<b>CAUTION</b> - File contains one or more Solid Regions containing boundary arcs. These arcs have been converted to linear segments that approximate the arc."),
+        ("6.8", "", "<b>CAUTION</b> - File contains one or more Component Bodies containing boundary arcs. These arcs have been converted to linear segments that approximate the arc."),
+        ("6.8", "", "<b>CAUTION</b> - File contains one or more Matched Length Rules. Rule atributes have been changed. Rule does not support pattern related attributes (amplitude, gap) anymore they are treated as tool attibutes instead.Rule is enhanced with subscoping attributes - allowing checking between nets in the same differential pair, between differential pairs as well as other electrical objects"),
+        ("6.8", "", "<b>CAUTION</b> - Board cutout objects introduced. Be aware that if your design contains board cutouts, they cannot be read in previous versions."),
+        ("6.8", "", "<b>CAUTION</b> - New type of text - barcode text was introduced. Be aware that if your design contains barcodes they cannot be read in previous versions."),
+        ("6.8", "", "<b>CAUTION</b> - Polygon/Layer dependent connect style rule for pads and vias was introduced. First scope should define pads/vias while 2nd scope should define polygons.Second scope is not readable in versions prior to 6.8 and is assumed to be 'All'."),
+        ("6.9", "", "<b>CAUTION</b> - File contains one or more Component Bodies containing embedded STEP models. These models have be discarded."),
+        ("6.9", "", "<b>CAUTION</b> - File contains one or more Components with pads with Pad Jumper IDs. The pads Pad Jumper ID fields have been discarded."),
+        ("7.0", "", "<b>CAUTION</b> - File may contain Component Bodies with linked STEP models. These models will be discarded."),
+        ("Winter 09", "", "<b>CAUTION</b> - Vias support varying diameters across layerstack. If this feature is used in design, extra values will be discarded."),
+        ("Winter 09", "", "<b>CAUTION</b> - File may contain pads with hole offsets. Hole offset information will be discarded."),
+        ("Winter 09", "", "<b>CAUTION</b> - File contains new manufacturing rules. Hole To Hole clearance, Minimum solder mask sliver, Silkscreen Over Exposed Copper and Silkscreen To Silkscreen Clearance rules were introduced in Altium Designer Winter 09.These rules will be discarded."),
+        ("Winter 09", "", "<b>CAUTION</b> - 3D models now support texturing.If used in design these textures will be discarded."),
+        ("Summer 09", "<b>CAUTION</b> - File contains old violation objects. These violations are no longer supported & will not be loaded. Please run DRC after opening this file in order to refresh the violations.", "<b>CAUTION</b> - File contains new custom violations that replaced the old violation objects. These violations were introduced in Altium Designer Summer 09. The new custom violations will be discarded."),
+        ("Summer 09", "", "<b>CAUTION</b> - Support was added for 32 Mechanical Layers. Objects on mechanical layers beyond 16 have been moved to Mechanical Layer 16."),
+        ("Summer 09", "<b>CAUTION</b> - Existing testpoint rules and settings are used as fabrication testpoint information.", "<b>CAUTION</b> - File contains assembly testpoint rules and/or settings.  Assembly testpoint information will be discarded."),
+        ("Release 10", "", "<b>CAUTION</b> - New Custom Grids and Guides were introduced. Be aware that your design might contain Custom Grids and Guides that cannot be read in previous versions. "),
+        ("Release 10", "", "<b>CAUTION</b> - New Structured Clusters were introduced. Be aware that your design might contain Structured Clusters that cannot be read in previous versions. "),
+        ("Release 10", "", "<b>CAUTION</b> - New PCB 3D Movie Manager was introduced. Be aware that your design might contain 3D PCB movie that cannot be read in previous versions. "),
+        ("Release 10 update 1", "", "<b>CAUTION</b> - New Clearance Rule subscopes targeting differential pairs  were introduced. Be aware that your design might contain Clearance Rules using those subscopes that cannot be read in previous versions. "),
+        ("Release 10 update 15", "", "<b>CAUTION</b> - Support of Solder Mask and Paste Mask expansions for Tracks, Arcs, Fills and Regions was introduced. Be aware that your design might contain Solder Mask and Paste Mask expansions for these types of primitives that cannot be read in the version of Altium Designer you are currently using. "),
+        ("Release 12", "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness.", "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness."),
+        ("Release 13", "<b>CAUTION</b> - Silkscreen Over Component Pads Rules are converted to Silk To Solder Mask Clearance Rules. Suggest examining rule scopes for accuracy.", "<b>CAUTION</b> - Silk To Solder Mask Clearance Rules are converted to Silkscreen Over Component Pads Rules."),
+        ("Release 14", "", "<b>CAUTION</b> - The Differential Pairs Routing rule added support for control of the width. Be aware that these widths must be manually entered as Width rules in this version."),
+        ("Release 15", "", "<b>CAUTION</b> - Support of separate solder masks for top & bottom of pads added."),
+        ("Release 15.1", "", "<b>CAUTION</b> - Support Multi-line PCB Text added."),
+        ("Release 16.0", "", "<b>CAUTION</b> - Pad/Via hole size tolerance value added."),
+        ("Release 17.0", "", "<b>CAUTION</b> - Component parameters added."),
+        ("Release 17.0", "", "<b>CAUTION</b> - Support of backdrilling"),
+        ("Release 17.1", "", "<b>CAUTION</b> - Support of waived violations"),
+        ("Release 17.1", "", "<b>CAUTION</b> - Support of object specific keepouts"),
+        ("Release 20.0", "", ""),
     ];
     fn codepoints(s: &str) -> String {
         s.chars()
@@ -598,7 +603,12 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         Ok(())
     })?;
 
+    // Pad main block is 202 bytes; the trailing bytes after our typed
+    // fields are zero-padded. Writing a shorter block desyncs subsequent
+    // records in Pads6.
+    const PAD_MAIN_BLOCK_TOTAL: usize = 202;
     bw.write_block(|w| {
+        let start = w.position()?;
         let flags = PrimitiveFlags {
             is_locked: pad.is_locked,
             is_tenting_top: pad.is_tenting_top,
@@ -623,7 +633,6 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         w.write_u8(i32::from(pad.shape_bottom) as u8)?;
         w.write_f64(pad.rotation)?;
         w.write_u8(if pad.is_plated { 1 } else { 0 })?;
-        // Offset 61-85
         w.write_u8(0)?;
         w.write_u8(pad.mode as u8)?;
         w.write_u8(pad.power_plane_connect_style as u8)?;
@@ -633,12 +642,9 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         w.write_i32(pad.power_plane_clearance.to_raw())?;
         w.write_i32(pad.power_plane_relief_expansion.to_raw())?;
         w.write_i32(0)?;
-        // Offset 86-93
         w.write_i32(pad.paste_mask_expansion.to_raw())?;
         w.write_i32(pad.solder_mask_expansion.to_raw())?;
-        // Offset 94-100: 7 zero bytes
         w.write_fill(0, 7)?;
-        // Offset 101-102: manual mask flags
         w.write_u8(if pad.paste_mask_expansion.to_raw() != 0 {
             2
         } else {
@@ -649,23 +655,20 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         } else {
             0
         })?;
-        // Offset 103: drill type
         w.write_u8(pad.drill_type as u8)?;
-        // Offset 104-105
         w.write_i16(0)?;
-        // Offset 106-109
         w.write_i32(0)?;
-        // Offset 110-111: jumper id
         w.write_i16(pad.jumper_id as i16)?;
-        // Offset 112-113
         w.write_i16(0)?;
+        let written = (w.position()? - start) as usize;
+        if written < PAD_MAIN_BLOCK_TOTAL {
+            w.write_fill(0, PAD_MAIN_BLOCK_TOTAL - written)?;
+        }
         Ok(())
     })?;
 
-    if !pad.has_size_shape_block {
-        bw.write_block(|_| Ok(()))?;
-        return Ok(());
-    }
+    // Always emit the 596-byte size/shape block — Altium reads it on
+    // every pad regardless of `mode`, and omitting it desyncs Pads6.
     bw.write_block(|w| {
         for v in &pad.layer_x_sizes {
             w.write_i32(*v)?;
@@ -699,7 +702,11 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
 }
 
 fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()> {
+    // Via record block is 360 bytes; trailing bytes after our typed
+    // fields are zero-padded. A shorter block desyncs Vias6.
+    const VIA_BLOCK_TOTAL: usize = 360;
     bw.write_block(|w| {
+        let start = w.position()?;
         let flags = PrimitiveFlags {
             is_locked: via.is_locked,
             is_tenting_top: via.is_tenting_top,
@@ -743,6 +750,10 @@ fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()>
         }
         w.write_i16(via.trailing_reserved_i16)?;
         w.write_i32(via.trailing_reserved_i32)?;
+        let written = (w.position()? - start) as usize;
+        if written < VIA_BLOCK_TOTAL {
+            w.write_fill(0, VIA_BLOCK_TOTAL - written)?;
+        }
         Ok(())
     })
 }
@@ -756,12 +767,18 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
             is_keepout: track.is_keepout,
         }
         .encode();
-        write_common_prefix(w, track.layer as u8, flags)?;
+        // Net + component indexes go in the common prefix. Altium ignores
+        // the trailing copies some old writers (and our old reader) wrote.
+        write_common_prefix_full(
+            w,
+            track.layer as u8,
+            flags,
+            track.net_index as i32,
+            track.component_index as i32,
+        )?;
         write_coord_point(w, track.start)?;
         write_coord_point(w, track.end)?;
         w.write_i32(track.width.to_raw())?;
-        w.write_u16(track.net_index)?;
-        w.write_u8(track.component_index)?;
         Ok(())
     })
 }
@@ -1137,25 +1154,17 @@ impl Document {
     pub fn to_bytes(&self) -> Result<Vec<u8>> {
         let mut cf = CompoundFile::create()?;
 
-        write_doc_board(&mut cf, self)?;
-        write_doc_wide_strings(&mut cf, self)?;
-        write_doc_nets(&mut cf, self)?;
-        write_doc_components(&mut cf, self)?;
-        write_doc_arcs(&mut cf, self)?;
-        write_doc_pads(&mut cf, self)?;
-        write_doc_vias(&mut cf, self)?;
-        write_doc_tracks(&mut cf, self)?;
-        write_doc_texts(&mut cf, self)?;
-        write_doc_fills(&mut cf, self)?;
-        write_doc_regions(&mut cf, self)?;
-        write_doc_component_bodies(&mut cf, self)?;
-        write_doc_polygons(&mut cf, self)?;
-        write_doc_rules(&mut cf, self)?;
-        write_doc_classes(&mut cf, self)?;
-        write_doc_differential_pairs(&mut cf, self)?;
-        write_doc_rooms(&mut cf, self)?;
-        write_doc_embedded_boards(&mut cf, self)?;
-        write_additional_streams(&mut cf, "", &self.additional_streams)?;
+        let mut doc = self.clone();
+        resolve_primitive_net_indexes(&mut doc);
+
+        // Entries consumed from this map as we go land in their canonical
+        // OLE position; the trailing `write_additional_streams` call
+        // catches anything that didn't.
+        let mut leftover = doc.additional_streams.clone();
+
+        write_doc_file_headers(&mut cf, &doc, &mut leftover)?;
+        write_doc_storages_in_canonical_order(&mut cf, &doc, &mut leftover)?;
+        write_additional_streams(&mut cf, "", &leftover)?;
 
         cf.into_bytes()
     }
@@ -1180,21 +1189,469 @@ impl Document {
     }
 }
 
-fn write_doc_board(cf: &mut CompoundFile, document: &Document) -> Result<()> {
-    let Some(params) = &document.board_parameters else {
-        return Ok(());
+/// Fill each primitive's `net_index` from its `net` name. Indexing is
+/// 1-based on disk; `0` means "no net", and unknown names collapse to `0`.
+fn resolve_primitive_net_indexes(document: &mut Document) {
+    let lookup: std::collections::HashMap<&str, u16> = document
+        .nets
+        .iter()
+        .enumerate()
+        .filter_map(|(i, net)| {
+            let idx = (i + 1) as u32;
+            (idx <= 0xFFFE).then_some((net.name.as_str(), idx as u16))
+        })
+        .collect();
+    let resolve = |name: &Option<String>| -> u16 {
+        name.as_deref()
+            .and_then(|n| lookup.get(n).copied())
+            .unwrap_or(0)
     };
+    for t in &mut document.tracks {
+        t.net_index = resolve(&t.net);
+    }
+    for a in &mut document.arcs {
+        a.net_index = resolve(&a.net);
+    }
+    for p in &mut document.pads {
+        p.net_index = resolve(&p.net);
+    }
+    for v in &mut document.vias {
+        v.net_index = resolve(&v.net);
+    }
+    for f in &mut document.fills {
+        f.net_index = resolve(&f.net);
+    }
+    for r in &mut document.regions {
+        r.net_index = resolve(&r.net);
+    }
+}
+
+fn write_doc_board(cf: &mut CompoundFile, document: &Document) -> Result<()> {
     cf.create_storage("Board6")?;
     write_storage_header(cf, "Board6/Header", 1)?;
+
+    let entries: Vec<(String, String)> =
+        super::defaults::ensure_pcbdoc_board_parameters_complete(
+            document.board_parameters.as_ref().map(|v| v.as_slice()),
+        );
+
     let mut buf = Cursor::new(Vec::<u8>::new());
     let mut bw = BinaryWriter::new(&mut buf);
-    let mut map = ParameterMap::new();
-    for (k, v) in params {
-        map.insert(k, v.clone());
-    }
-    write_c_string_param_block(&mut bw, &map)?;
+    // Emit verbatim `|k=v|…\x00` so repeated `RECORD=Board` markers and
+    // embedded `\r` separators round-trip byte-for-byte.
+    bw.write_block(|w| {
+        let mut body = Vec::<u8>::new();
+        for (k, v) in &entries {
+            body.push(b'|');
+            body.extend_from_slice(crate::encoding::encode(k).as_ref());
+            body.push(b'=');
+            body.extend_from_slice(crate::encoding::encode(v).as_ref());
+        }
+        body.push(0);
+        w.write_bytes(&body)?;
+        Ok(())
+    })?;
     cf.write_stream("Board6/Data", &buf.into_inner())?;
     Ok(())
+}
+
+/// Emit `FileHeaderSix` (75-byte modern marker) and `FileHeader` (24-byte
+/// legacy stub). Order matters — `FileHeaderSix` lands at SID 1, which is
+/// what marks the file as modern PcbDoc. Round-trips reuse `additional_streams`
+/// bytes verbatim when present.
+fn write_doc_file_headers(
+    cf: &mut CompoundFile,
+    _document: &Document,
+    leftover: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    if let Some(bytes) = leftover.remove("FileHeaderSix") {
+        cf.write_stream("FileHeaderSix", &bytes)?;
+    } else {
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        let mut bw = BinaryWriter::new(&mut buf);
+        let version_text = "PCB 6.0 Binary File";
+        let version_bytes = encoding::encode(version_text);
+        bw.write_i32(version_bytes.len() as i32)?;
+        bw.write_u8(version_bytes.len() as u8)?;
+        bw.write_bytes(&version_bytes)?;
+        bw.write_f64(5.01)?;
+        let guid = stable_document_guid();
+        let id_bytes = encoding::encode(&guid);
+        bw.write_i32(id_bytes.len() as i32)?;
+        bw.write_u8(id_bytes.len() as u8)?;
+        bw.write_bytes(&id_bytes)?;
+        cf.write_stream("FileHeaderSix", &buf.into_inner())?;
+    }
+
+    if let Some(bytes) = leftover.remove("FileHeader") {
+        cf.write_stream("FileHeader", &bytes)?;
+    } else {
+        let mut legacy: Vec<u8> = Vec::with_capacity(24);
+        legacy.extend_from_slice(&19i32.to_le_bytes());
+        for ch in "PCB 5.0 Bi".chars() {
+            let v = ch as u32;
+            legacy.push((v & 0xff) as u8);
+            legacy.push(((v >> 8) & 0xff) as u8);
+        }
+        debug_assert_eq!(legacy.len(), 24);
+        cf.write_stream("FileHeader", &legacy)?;
+    }
+    Ok(())
+}
+
+/// Per-session GUID for from-scratch documents, derived from the clock.
+fn stable_document_guid() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(0xDEAD_BEEF_CAFE_BABE);
+    let a = (nanos as u32).wrapping_mul(0x9E37_79B9);
+    let b = ((nanos >> 32) as u32) ^ a;
+    let c = (nanos.wrapping_mul(0xBF58_476D_1CE4_E5B9) >> 16) as u16;
+    let d = ((nanos.wrapping_mul(0x94D0_49BB_1331_11EB)) >> 48) as u16;
+    let e = nanos.wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+    format!(
+        "{{{:08X}-{:04X}-{:04X}-{:04X}-{:012X}}}",
+        a,
+        (b & 0xFFFF) as u16,
+        ((b >> 16) & 0xFFFF) as u16,
+        c ^ d,
+        e & 0xFFFF_FFFF_FFFF,
+    )
+}
+
+/// Create every storage and stream in the canonical order a freshly-saved
+/// Altium PcbDoc emits. Each entry pulls from `leftover` (round-trip case)
+/// or falls back to a default stub, removing the key from `leftover` so the
+/// trailing `write_additional_streams` doesn't double-write it.
+fn write_doc_storages_in_canonical_order(
+    cf: &mut CompoundFile,
+    doc: &Document,
+    leftover: &mut std::collections::BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    let default_advanced_placer = default_param_block(&[
+        ("RECORD", "AdvancedPlacerOptions"),
+        ("PLACELARGECLEAR", "50mil"),
+        ("PLACESMALLCLEAR", "20mil"),
+        ("PLACEUSEROTATION", "TRUE"),
+        ("PLACEUSELAYERSWAP", "FALSE"),
+        ("PLACEBYPASSNET1", ""),
+        ("PLACEBYPASSNET2", ""),
+        ("PLACEUSEADVANCEDPLACE", "TRUE"),
+        ("PLACEUSEGROUPING", "TRUE"),
+    ]);
+    let default_drc = default_param_block(&[
+        ("RECORD", "DesignRuleCheckerOptions"),
+        ("DOMAKEDRCFILE", "FALSE"),
+        ("DOMAKEDRCERRORLIST", "FALSE"),
+        ("DOSUBNETDETAILS", "TRUE"),
+        ("REPORTFILENAME", ""),
+        ("EXTERNALNETLISTFILENAME", ""),
+        ("CHECKEXTERNALNETLIST", "FALSE"),
+        ("MAXVIOLATIONCOUNT", "500"),
+        ("REPORTDRILLEDSMTPADS", "FALSE"),
+        ("REPORTINVALIDMULTILAYERPADS", "TRUE"),
+    ]);
+    let default_pin_swap = default_param_block(&[
+        ("RECORD", "PinSwapOptions"),
+        ("QUIET", "FALSE"),
+        ("APPROXIMATEPINPOSITIONS", "FALSE"),
+        ("ALLOWPARTIALLYROUTEDCONNECTIONS", "TRUE"),
+        ("VIAPENALTYSTATE", "TRUE"),
+        ("CROSSOVERRATIO", "50"),
+        ("VIAPENALTYVALUE", "0"),
+        ("IGNORENETS", ""),
+        ("IGNORENETCLASSES", ""),
+        ("IGNORECOMPONENTS", ""),
+        ("IGNOREDIFFERENTIALPAIRS", ""),
+        ("HEURISTICNAME", ""),
+        ("HEURISTICONOFFSTATE", ""),
+        ("HEURISTICWEIGHTVALUE", ""),
+    ]);
+    let default_padvia_cache = default_param_block(&[
+        (
+            "PADVIALIBRARY.LIBRARYID",
+            "{00000000-0000-0000-0000-000000000001}",
+        ),
+        ("PADVIALIBRARY.LIBRARYNAME", "<Local>"),
+        ("PADVIALIBRARY.DISPLAYUNITS", "1"),
+    ]);
+    let layer_kind_data = default_layer_kind_mapping_data();
+    let fvi_data = default_file_version_info_data();
+
+    // Pre-Board6.
+    emit_or_consume(cf, leftover, "Texts", 3, &[])?;
+    emit_or_consume(cf, leftover, "EmbeddedFonts6", 0, &[])?;
+
+    write_doc_board(cf, doc)?;
+
+    emit_or_consume(cf, leftover, "Advanced Placer Options6", 0, &default_advanced_placer)?;
+    emit_or_consume(cf, leftover, "Design Rule Checker Options6", 0, &default_drc)?;
+
+    write_doc_classes(cf, doc)?;
+    emit_or_consume(cf, leftover, "Classes6", 0, &[])?;
+    write_doc_nets(cf, doc)?;
+    emit_or_consume(cf, leftover, "Nets6", 0, &[])?;
+    write_doc_components(cf, doc)?;
+    emit_or_consume(cf, leftover, "Components6", 0, &[])?;
+    write_doc_polygons(cf, doc)?;
+    emit_or_consume(cf, leftover, "Polygons6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Dimensions6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Coordinates6", 0, &[])?;
+    write_doc_embedded_boards(cf, doc)?;
+    emit_or_consume(cf, leftover, "EmbeddedBoards6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Connections6", 0, &[])?;
+    write_doc_rules(cf, doc)?;
+    emit_or_consume(cf, leftover, "Rules6", 0, &[])?;
+    emit_or_consume(cf, leftover, "FromTos6", 0, &[])?;
+    write_doc_differential_pairs(cf, doc)?;
+    emit_or_consume(cf, leftover, "DifferentialPairs6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Embeddeds6", 0, &[])?;
+    write_doc_arcs(cf, doc)?;
+    emit_or_consume(cf, leftover, "Arcs6", 0, &[])?;
+    write_doc_pads(cf, doc)?;
+    emit_or_consume(cf, leftover, "Pads6", 0, &[])?;
+    write_doc_vias(cf, doc)?;
+    emit_or_consume(cf, leftover, "Vias6", 0, &[])?;
+    write_doc_tracks(cf, doc)?;
+    emit_or_consume(cf, leftover, "Tracks6", 0, &[])?;
+    write_doc_texts(cf, doc)?;
+    emit_or_consume(cf, leftover, "Texts6", 0, &[])?;
+    write_doc_fills(cf, doc)?;
+    emit_or_consume(cf, leftover, "Fills6", 0, &[])?;
+    write_doc_regions(cf, doc)?;
+    emit_or_consume(cf, leftover, "Regions6", 0, &[])?;
+    write_doc_component_bodies(cf, doc)?;
+    emit_or_consume(cf, leftover, "ComponentBodies6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Pin Swap Options6", 0, &default_pin_swap)?;
+    write_doc_wide_strings(cf, doc)?;
+    emit_or_consume(cf, leftover, "WideStrings6", 0, &[])?;
+    emit_or_consume(cf, leftover, "ShapeBasedRegions6", 0, &[])?;
+    emit_or_consume(cf, leftover, "ShapeBasedComponentBodies6", 0, &[])?;
+    emit_or_consume(cf, leftover, "Models", 0, &[])?;
+    emit_or_consume(cf, leftover, "ModelsNoEmbed", 0, &[])?;
+    emit_or_consume(cf, leftover, "Textures", 0, &[])?;
+    emit_or_consume(cf, leftover, "ExtendedPrimitiveInformation", 0, &[])?;
+    emit_or_consume(cf, leftover, "UnionNames", 0, &[])?;
+    emit_or_consume(cf, leftover, "SmartUnions", 0, &[])?;
+    emit_or_consume(cf, leftover, "BoardRegions", 0, &[])?;
+    emit_or_consume(cf, leftover, "UniqueIDPrimitiveInformation", 0, &[])?;
+    emit_or_consume(cf, leftover, "PinPairsSection", 0, &[])?;
+    emit_or_consume(cf, leftover, "SignalClasses", 0, &[])?;
+    emit_or_consume(cf, leftover, "PadViaLibrary", 0, &[])?;
+    emit_or_consume(cf, leftover, "PadViaLibraryCache", 0, &default_padvia_cache)?;
+    emit_or_consume(cf, leftover, "PadViaLibraryLinks", 0, &[])?;
+    emit_or_consume(cf, leftover, "PrimitiveParameters", 0, &[])?;
+    emit_or_consume(cf, leftover, "WaivedViolations", 0, &[])?;
+    emit_or_consume(cf, leftover, "LayerKindMapping", 1, &layer_kind_data)?;
+    emit_or_consume(cf, leftover, "ConstraintManager", 0, &[])?;
+    emit_or_consume(cf, leftover, "PadViaCacheLibraryLinksSection", 0, &[])?;
+    emit_or_consume(cf, leftover, "PrimitiveGuids", 0, &[])?;
+    emit_or_consume(cf, leftover, "FileVersionInfo", 1, &fvi_data)?;
+
+    Ok(())
+}
+
+/// Write `path` using `leftover` Header/Data bytes when present, otherwise
+/// the supplied defaults. If a typed writer already created the storage,
+/// leave it alone but still consume matching `leftover` entries so they
+/// don't get re-emitted later.
+fn emit_or_consume(
+    cf: &mut CompoundFile,
+    leftover: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    path: &str,
+    default_header: u32,
+    default_data: &[u8],
+) -> Result<()> {
+    let header_key = format!("{path}/Header");
+    let data_key = format!("{path}/Data");
+
+    if cf.is_storage(path) {
+        leftover.remove(&header_key);
+        leftover.remove(&data_key);
+        return Ok(());
+    }
+
+    cf.create_storage(path)?;
+    if let Some(bytes) = leftover.remove(&header_key) {
+        cf.write_stream(&header_key, &bytes)?;
+    } else {
+        cf.write_stream(&header_key, &default_header.to_le_bytes())?;
+    }
+    if let Some(bytes) = leftover.remove(&data_key) {
+        cf.write_stream(&data_key, &bytes)?;
+    } else {
+        cf.write_stream(&data_key, default_data)?;
+    }
+    Ok(())
+}
+
+#[allow(dead_code)]
+fn write_doc_default_root_stubs(cf: &mut CompoundFile, document: &Document) -> Result<()> {
+    if !document.additional_streams.contains_key("FileVersionInfo/Header") {
+        cf.write_stream("FileVersionInfo/Header", &u32_le_bytes(1))?;
+    }
+    if !document.additional_streams.contains_key("FileVersionInfo/Data") {
+        cf.write_stream("FileVersionInfo/Data", &default_file_version_info_data())?;
+    }
+
+    // Each stub is a 4-byte u32 record-count + a (usually empty) data payload.
+    let mut emit = |path: &str, header: u32, data: &[u8]| -> Result<()> {
+        if document.additional_streams.contains_key(&format!(
+            "{}/Header",
+            path
+        )) {
+            return Ok(());
+        }
+        if cf.is_storage(path) {
+            return Ok(());
+        }
+        cf.create_storage(path)?;
+        cf.write_stream(format!("{path}/Header"), &header.to_le_bytes())?;
+        cf.write_stream(format!("{path}/Data"), data)?;
+        Ok(())
+    };
+
+    // Storage names below mirror what Altium's own writer produces. Names
+    // it doesn't emit (CornerRadiusChamfer, CustomShapes, DrillManager,
+    // LettersGeometry, Rooms6) were tried and rejected.
+    for name in [
+        "Arcs6",
+        "Pads6",
+        "Vias6",
+        "Tracks6",
+        "Texts6",
+        "Fills6",
+        "Regions6",
+        "ComponentBodies6",
+        "Components6",
+        "Nets6",
+        "Polygons6",
+        "Rules6",
+        "Classes6",
+        "DifferentialPairs6",
+        "EmbeddedBoards6",
+        "WideStrings6",
+        "Dimensions6",
+        "Coordinates6",
+        "Connections6",
+        "FromTos6",
+        "Embeddeds6",
+        "ShapeBasedRegions6",
+        "ShapeBasedComponentBodies6",
+        "ModelsNoEmbed",
+        "Textures",
+        "ExtendedPrimitiveInformation",
+        "UnionNames",
+        "SmartUnions",
+        "BoardRegions",
+        "UniqueIDPrimitiveInformation",
+        "PinPairsSection",
+        "SignalClasses",
+        "PadViaLibrary",
+        "PadViaLibraryLinks",
+        "PrimitiveParameters",
+        "WaivedViolations",
+        "ConstraintManager",
+        "PrimitiveGuids",
+        "EmbeddedFonts6",
+        "Models",
+    ] {
+        emit(name, 0, &[])?;
+    }
+
+    // Option-block storages with default parameter content.
+    emit(
+        "Advanced Placer Options6",
+        0,
+        &default_param_block(&[
+            ("RECORD", "AdvancedPlacerOptions"),
+            ("PLACELARGECLEAR", "50mil"),
+            ("PLACESMALLCLEAR", "20mil"),
+            ("PLACEUSEROTATION", "TRUE"),
+            ("PLACEUSELAYERSWAP", "FALSE"),
+            ("PLACEBYPASSNET1", ""),
+            ("PLACEBYPASSNET2", ""),
+            ("PLACEUSEADVANCEDPLACE", "TRUE"),
+            ("PLACEUSEGROUPING", "TRUE"),
+        ]),
+    )?;
+    emit(
+        "Design Rule Checker Options6",
+        0,
+        &default_param_block(&[
+            ("RECORD", "DesignRuleCheckerOptions"),
+            ("DOMAKEDRCFILE", "FALSE"),
+            ("DOMAKEDRCERRORLIST", "FALSE"),
+            ("DOSUBNETDETAILS", "TRUE"),
+            ("REPORTFILENAME", ""),
+            ("EXTERNALNETLISTFILENAME", ""),
+            ("CHECKEXTERNALNETLIST", "FALSE"),
+            ("MAXVIOLATIONCOUNT", "500"),
+            ("REPORTDRILLEDSMTPADS", "FALSE"),
+            ("REPORTINVALIDMULTILAYERPADS", "TRUE"),
+        ]),
+    )?;
+    emit(
+        "Pin Swap Options6",
+        0,
+        &default_param_block(&[
+            ("RECORD", "PinSwapOptions"),
+            ("QUIET", "FALSE"),
+            ("APPROXIMATEPINPOSITIONS", "FALSE"),
+            ("ALLOWPARTIALLYROUTEDCONNECTIONS", "TRUE"),
+            ("VIAPENALTYSTATE", "TRUE"),
+            ("CROSSOVERRATIO", "50"),
+            ("VIAPENALTYVALUE", "0"),
+            ("IGNORENETS", ""),
+            ("IGNORENETCLASSES", ""),
+            ("IGNORECOMPONENTS", ""),
+            ("IGNOREDIFFERENTIALPAIRS", ""),
+            ("HEURISTICNAME", ""),
+            ("HEURISTICONOFFSTATE", ""),
+            ("HEURISTICWEIGHTVALUE", ""),
+        ]),
+    )?;
+    emit(
+        "PadViaLibraryCache",
+        0,
+        &default_param_block(&[
+            (
+                "PADVIALIBRARY.LIBRARYID",
+                "{00000000-0000-0000-0000-000000000001}",
+            ),
+            ("PADVIALIBRARY.LIBRARYNAME", "<Local>"),
+            ("PADVIALIBRARY.DISPLAYUNITS", "1"),
+        ]),
+    )?;
+    emit("LayerKindMapping", 1, &default_layer_kind_mapping_data())?;
+
+    // Legacy `Texts` storage — Altium expects it present, but tolerates
+    // an empty Data payload.
+    if !cf.is_storage("Texts") {
+        cf.create_storage("Texts")?;
+        cf.write_stream("Texts/Header", &3u32.to_le_bytes())?;
+        cf.write_stream("Texts/Data", &[])?;
+    }
+
+    Ok(())
+}
+
+fn default_param_block(entries: &[(&str, &str)]) -> Vec<u8> {
+    let mut body = String::new();
+    for (k, v) in entries {
+        body.push('|');
+        body.push_str(k);
+        body.push('=');
+        body.push_str(v);
+    }
+    let mut bytes = body.into_bytes();
+    bytes.push(0);
+    let mut out = Vec::with_capacity(4 + bytes.len());
+    out.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+    out.extend_from_slice(&bytes);
+    out
 }
 
 fn write_doc_wide_strings(cf: &mut CompoundFile, document: &Document) -> Result<()> {
@@ -1270,6 +1727,29 @@ where
     I: IntoIterator,
     F: Fn(&I::Item, &mut ParameterMap),
 {
+    write_param_storage_with_prefix(cf, storage, items, fill_one, None)
+}
+
+/// Like `write_param_storage` but allows a per-record version word that
+/// gets emitted before each record's size header.
+///
+/// Some param-record storages (Rules6 in particular) carry a `u16`
+/// "record version" word in front of every record's `u32 size` prefix.
+/// The reader auto-detects this in `detect_record_prefix` and the
+/// per-record bytes have to round-trip — without them Altium fires the
+/// "catastrophic error" dialog on file open because every rule record
+/// after the first is read at the wrong offset.
+fn write_param_storage_with_prefix<I, F>(
+    cf: &mut CompoundFile,
+    storage: &str,
+    items: I,
+    fill_one: F,
+    record_version: Option<u16>,
+) -> Result<()>
+where
+    I: IntoIterator,
+    F: Fn(&I::Item, &mut ParameterMap),
+{
     let collected: Vec<_> = items.into_iter().collect();
     if collected.is_empty() {
         return Ok(());
@@ -1279,6 +1759,9 @@ where
     let mut buf = Cursor::new(Vec::<u8>::new());
     let mut bw = BinaryWriter::new(&mut buf);
     for item in collected.iter() {
+        if let Some(v) = record_version {
+            bw.write_u16(v)?;
+        }
         let mut params = ParameterMap::new();
         fill_one(item, &mut params);
         write_c_string_param_block(&mut bw, &params)?;
@@ -1306,9 +1789,25 @@ fn write_doc_polygons(cf: &mut CompoundFile, document: &Document) -> Result<()> 
 }
 
 fn write_doc_rules(cf: &mut CompoundFile, document: &Document) -> Result<()> {
-    write_param_storage(cf, "Rules6", document.rules.iter(), |r, p| {
-        super::doc_codec::rule_to_params(r, p);
-    })
+    // Each Rules6 record is preceded by a u16 rule-type-code word. The
+    // value is rule-kind-specific (e.g. UnpouredPolygon = 62,
+    // SilkToSilkClearance = 55, FanoutControl = 49). We preserve the
+    // exact code each rule was read with via `rule.rule_type_code`.
+    if document.rules.is_empty() {
+        return Ok(());
+    }
+    cf.create_storage("Rules6")?;
+    write_storage_header(cf, "Rules6/Header", document.rules.len() as i32)?;
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    let mut bw = BinaryWriter::new(&mut buf);
+    for rule in &document.rules {
+        bw.write_u16(rule.rule_type_code)?;
+        let mut params = ParameterMap::new();
+        super::doc_codec::rule_to_params(rule, &mut params);
+        write_c_string_param_block(&mut bw, &params)?;
+    }
+    cf.write_stream("Rules6/Data", &buf.into_inner())?;
+    Ok(())
 }
 
 fn write_doc_classes(cf: &mut CompoundFile, document: &Document) -> Result<()> {

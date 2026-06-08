@@ -1482,6 +1482,9 @@ fn read_doc_wide_strings(cf: &mut CompoundFile) -> Result<Vec<String>> {
     let Some(data) = cf.try_read_stream("WideStrings6/Data")? else {
         return Ok(Vec::new());
     };
+    if data.is_empty() {
+        return Ok(Vec::new());
+    }
     let mut br = BinaryReader::new(Cursor::new(data))?;
     let map = read_param_map(&mut br)?;
     let mut out = Vec::new();
@@ -1502,11 +1505,15 @@ fn read_board(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
     if data.is_empty() {
         return Ok(());
     }
+    // Split on `|` directly instead of `ParameterMap` — the latter dedupes
+    // by key and would drop Board6's repeated `RECORD=Board` markers.
     let mut br = BinaryReader::new(Cursor::new(data))?;
-    let params = read_param_map(&mut br)?;
-    let mut typed = BTreeMap::new();
-    for (name, value, _) in params.iter() {
-        typed.insert(name.to_string(), value.to_string());
+    let raw = br.read_c_string_block()?;
+    let mut typed: Vec<(String, String)> = Vec::new();
+    for part in raw.split('|') {
+        if let Some((k, v)) = part.split_once('=') {
+            typed.push((k.to_string(), v.to_string()));
+        }
     }
     document.board_parameters = Some(typed);
     Ok(())
@@ -1643,7 +1650,15 @@ fn read_doc_primitive_streams(
 fn for_each_param_record(
     cf: &mut CompoundFile,
     storage: &str,
-    visit: impl FnMut(&ParameterMap) -> Result<()>,
+    mut visit: impl FnMut(&ParameterMap) -> Result<()>,
+) -> Result<()> {
+    for_each_param_record_with_prefix(cf, storage, |_prefix, params| visit(params))
+}
+
+fn for_each_param_record_with_prefix(
+    cf: &mut CompoundFile,
+    storage: &str,
+    visit: impl FnMut(u16, &ParameterMap) -> Result<()>,
 ) -> Result<()> {
     let path = format!("{storage}/Data");
     let Some(data) = cf.try_read_stream(&path)? else {
@@ -1690,10 +1705,15 @@ fn detect_record_prefix(data: &[u8]) -> usize {
 fn parse_param_records(
     data: &[u8],
     prefix: usize,
-    mut visit: impl FnMut(&ParameterMap) -> Result<()>,
+    mut visit: impl FnMut(u16, &ParameterMap) -> Result<()>,
 ) -> Result<()> {
     let mut pos = 0usize;
     while pos + prefix + 4 <= data.len() {
+        let prefix_word: u16 = if prefix == 2 {
+            u16::from_le_bytes([data[pos], data[pos + 1]])
+        } else {
+            0
+        };
         pos += prefix;
         let size = u32::from_le_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]])
             & 0x00FF_FFFF;
@@ -1716,7 +1736,7 @@ fn parse_param_records(
         if params.is_empty() {
             continue;
         }
-        visit(&params)?;
+        visit(prefix_word, &params)?;
     }
     Ok(())
 }
@@ -1753,8 +1773,10 @@ fn read_polygons(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
 
 fn read_rules(cf: &mut CompoundFile, document: &mut Document) -> Result<()> {
     let mut rules = Vec::new();
-    for_each_param_record(cf, "Rules6", |params| {
-        rules.push(super::doc_codec::rule_from_params(params));
+    for_each_param_record_with_prefix(cf, "Rules6", |prefix, params| {
+        let mut r = super::doc_codec::rule_from_params(params);
+        r.rule_type_code = prefix;
+        rules.push(r);
         Ok(())
     })?;
     document.rules = rules;
@@ -1831,9 +1853,19 @@ fn resolve_net_names(document: &mut Document) {
             track.net = lookup(track.net_index);
         }
     }
+    for via in &mut document.vias {
+        if via.net.is_none() {
+            via.net = lookup(via.net_index);
+        }
+    }
     for fill in &mut document.fills {
         if fill.net.is_none() {
             fill.net = lookup(fill.net_index);
+        }
+    }
+    for region in &mut document.regions {
+        if region.net.is_none() {
+            region.net = lookup(region.net_index);
         }
     }
 }

@@ -159,6 +159,252 @@ pub(crate) fn ensure_pcblib_parameters_complete(
     }
 }
 
+/// Default Board6 scalar keys for a freshly-authored PcbDoc.
+pub(crate) fn populate_default_pcbdoc_parameters(params: &mut ParameterMap) {
+    let (date, time) = current_date_time_us();
+
+    // Per-board header object that precedes the global settings.
+    params.insert("SELECTION", "FALSE");
+    params.insert("LAYER", "UNKNOWN");
+    params.insert("LOCKED", "FALSE");
+    params.insert("POLYGONOUTLINE", "FALSE");
+    params.insert("USERROUTED", "TRUE");
+    params.insert("KEEPOUT", "FALSE");
+    params.insert("UNIONINDEX", "0");
+
+    // Format-marker keys: KIND/VERSION are what makes the file read as a
+    // modern PcbDoc rather than legacy Protel.
+    params.insert("KIND", "Protel_Advanced_PCB");
+    params.insert("VERSION", "5.01");
+    params.insert("DATE", date);
+    params.insert("TIME", time);
+
+    params.insert("ORIGINX", "0mil");
+    params.insert("ORIGINY", "0mil");
+    params.insert("BIGVISIBLEGRIDSIZE", "0.000");
+    params.insert("VISIBLEGRIDSIZE", "0.000");
+    params.insert("ELECTRICALGRIDRANGE", "3.937mil");
+    params.insert("ELECTRICALGRIDENABLED", "TRUE");
+    params.insert("SNAPGRIDSIZE", "39370.078740");
+    params.insert("SNAPGRIDSIZEX", "39370.078740");
+    params.insert("SNAPGRIDSIZEY", "39370.078740");
+    params.insert("TRACKGRIDSIZE", "200000.000000");
+    params.insert("VIAGRIDSIZE", "200000.000000");
+    params.insert("COMPONENTGRIDSIZE", "39370.078740");
+    params.insert("COMPONENTGRIDSIZEX", "39370.078740");
+    params.insert("COMPONENTGRIDSIZEY", "39370.078740");
+    params.insert("DOTGRID", "TRUE");
+    params.insert("DISPLAYUNIT", "0");
+    params.insert("DESIGNATORDISPLAYMODE", "0");
+    params.insert("PRIMITIVELOCK", "TRUE");
+    params.insert("POLYGONTYPE", "Polygon");
+    params.insert("POUROVER", "FALSE");
+    params.insert("REMOVEDEAD", "FALSE");
+    params.insert("GRIDSIZE", "10mil");
+    params.insert("TRACKWIDTH", "10mil");
+    params.insert("HATCHSTYLE", "None");
+    params.insert("USEOCTAGONS", "FALSE");
+    params.insert("MINPRIMLENGTH", "3mil");
+
+    params.insert("SHEETX", "1000mil");
+    params.insert("SHEETY", "1000mil");
+    params.insert("SHEETWIDTH", "10000mil");
+    params.insert("SHEETHEIGHT", "8000mil");
+    params.insert("SHOWSHEET", "FALSE");
+    params.insert("LOCKSHEET", "TRUE");
+    params.insert("SPLITLINECOUNT", "0");
+
+    // RECORD=Board terminates this section; further records (outline,
+    // stack) chain via embedded `\r` separators on later RECORD=Board keys.
+    params.insert("RECORD", "Board");
+
+    for i in 1..=16 {
+        params.insert(&format!("PLANE{i}NETNAME"), "(No Net)");
+    }
+
+    // Sentinel unit-square outline; callers usually overwrite VX/VY
+    // with real board geometry before this runs.
+    populate_default_pcbdoc_outline(params);
+
+    populate_default_pcbdoc_v9_stack(params);
+}
+
+/// Emit a rectangular board outline as `KIND{i}` / `VX{i}` / `VY{i}` segments.
+fn populate_default_pcbdoc_outline(params: &mut ParameterMap) {
+    let verts = [
+        ("0mil", "0mil"),
+        ("3937.0079mil", "0mil"),
+        ("3937.0079mil", "3937.0079mil"),
+        ("0mil", "3937.0079mil"),
+    ];
+    for (i, (vx, vy)) in verts.iter().enumerate() {
+        params.insert(&format!("KIND{i}"), "0");
+        params.insert(&format!("VX{i}"), *vx);
+        params.insert(&format!("VY{i}"), *vy);
+        params.insert(&format!("CX{i}"), "0mil");
+        params.insert(&format!("CY{i}"), "0mil");
+        params.insert(&format!("SA{i}"), " 0.00000000000000E+0000");
+        params.insert(&format!("EA{i}"), " 0.00000000000000E+0000");
+        params.insert(&format!("R{i}"), "0mil");
+    }
+}
+
+/// Build the Board6 entry list: user-supplied verbatim first, then any
+/// default keys the user didn't already cover. When the user already
+/// supplies a V9/V8 layer stack (signalled by `V9_MASTERSTACK_STYLE`),
+/// the fallback stack's sub-keys are skipped wholesale — cherry-picking
+/// them would inject layer slots that don't match the user's stack.
+pub(crate) fn ensure_pcbdoc_board_parameters_complete(
+    user: Option<&[(String, String)]>,
+) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(user) = user {
+        for (k, v) in user {
+            seen.insert(k.to_ascii_uppercase());
+            out.push((k.clone(), v.clone()));
+        }
+    }
+    let user_has_stack = seen.contains("V9_MASTERSTACK_STYLE");
+
+    let mut defaults = ParameterMap::new();
+    populate_default_pcbdoc_parameters(&mut defaults);
+    for (name, value, _is_utf8) in defaults.iter() {
+        if seen.contains(&name.to_ascii_uppercase()) {
+            continue;
+        }
+        if user_has_stack && is_v9_v8_stack_key(name) {
+            continue;
+        }
+        out.push((name.to_string(), value.to_string()));
+    }
+    out
+}
+
+fn is_v9_v8_stack_key(name: &str) -> bool {
+    let n = name.to_ascii_uppercase();
+    n.starts_with("V9_MASTERSTACK")
+        || n.starts_with("V9_STACK_LAYER")
+        || n.starts_with("V9_CACHE_LAYER")
+        || n.starts_with("V9_SUBSTACK")
+        || n.starts_with("V9_TRACEIMPEDANCE")
+        || n.starts_with("LAYERMASTERSTACK")
+        || n.starts_with("LAYERSUBSTACK_V8")
+        || n.starts_with("LAYER_V8_")
+        || n == "LAYERSTACKSTYLE"
+}
+
+/// 2-layer fallback V9 / V8 / V7 stack, filled in when the caller
+/// didn't supply one.
+fn populate_default_pcbdoc_v9_stack(params: &mut ParameterMap) {
+    type LayerSpec = (&'static str, u32, &'static [(&'static str, &'static str)]);
+    let stack: &[LayerSpec] = &[
+        ("Top Paste", 16_973_832, &[("USEDBYPRIMS", "FALSE")]),
+        ("Top Overlay", 16_973_830, &[("USEDBYPRIMS", "TRUE")]),
+        (
+            "Top Solder",
+            16_973_834,
+            &[
+                ("USEDBYPRIMS", "FALSE"),
+                ("DIELTYPE", "3"),
+                ("DIELCONST", "3.500"),
+                ("DIELHEIGHT", "0.4mil"),
+                ("DIELMATERIAL", "Solder Resist"),
+                ("COVERLAY_EXPANSION", "0mil"),
+            ],
+        ),
+        (
+            "Top Layer",
+            16_777_217,
+            &[
+                ("USEDBYPRIMS", "TRUE"),
+                ("COPTHICK", "1.4mil"),
+                ("COMPONENTPLACEMENT", "1"),
+            ],
+        ),
+        (
+            "Dielectric 1",
+            17_039_361,
+            &[
+                ("USEDBYPRIMS", "FALSE"),
+                ("DIELTYPE", "0"),
+                ("DIELCONST", "4.800"),
+                ("DIELHEIGHT", "12.6mil"),
+                ("DIELMATERIAL", "FR-4"),
+            ],
+        ),
+        (
+            "Bottom Layer",
+            16_842_751,
+            &[
+                ("USEDBYPRIMS", "TRUE"),
+                ("COPTHICK", "1.4mil"),
+                ("COMPONENTPLACEMENT", "2"),
+            ],
+        ),
+        (
+            "Bottom Solder",
+            16_973_835,
+            &[
+                ("USEDBYPRIMS", "FALSE"),
+                ("DIELTYPE", "3"),
+                ("DIELCONST", "3.500"),
+                ("DIELHEIGHT", "0.4mil"),
+                ("DIELMATERIAL", "Solder Resist"),
+                ("COVERLAY_EXPANSION", "0mil"),
+            ],
+        ),
+        ("Bottom Overlay", 16_973_831, &[("USEDBYPRIMS", "FALSE")]),
+        ("Bottom Paste", 16_973_833, &[("USEDBYPRIMS", "FALSE")]),
+    ];
+
+    if !params.contains_key("V9_MASTERSTACK_STYLE") {
+        params.insert("V9_MASTERSTACK_STYLE", "0");
+        params.insert(
+            "V9_MASTERSTACK_ID",
+            "{00000000-0000-0000-0000-000000000001}",
+        );
+        params.insert("V9_MASTERSTACK_NAME", "Master layer stack");
+        params.insert("V9_MASTERSTACK_SHOWTOPDIELECTRIC", "FALSE");
+        params.insert("V9_MASTERSTACK_SHOWBOTTOMDIELECTRIC", "FALSE");
+        params.insert("V9_MASTERSTACK_ISFLEX", "FALSE");
+
+        for (i, (name, layer_id, extras)) in stack.iter().enumerate() {
+            let prefix = format!("V9_STACK_LAYER{i}");
+            params.insert(
+                format!("{prefix}_ID").as_str(),
+                stable_layer_guid(b"doc_stack", i),
+            );
+            params.insert(format!("{prefix}_NAME").as_str(), (*name).to_string());
+            params.insert(format!("{prefix}_LAYERID").as_str(), layer_id.to_string());
+            for (k, v) in *extras {
+                params.insert(format!("{prefix}_{k}").as_str(), (*v).to_string());
+            }
+        }
+    }
+}
+
+fn current_date_time_us() -> (String, String) {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let days_since_epoch = (secs / 86_400) as i64;
+    let secs_in_day = (secs % 86_400) as u32;
+    let (y, m, d) = days_to_ymd(days_since_epoch);
+    let date = format!("{}/{}/{:04}", m, d, y);
+    let h24 = secs_in_day / 3600;
+    let mi = (secs_in_day % 3600) / 60;
+    let s = secs_in_day % 60;
+    let ampm = if h24 < 12 { "AM" } else { "PM" };
+    let h12 = match h24 % 12 {
+        0 => 12,
+        h => h,
+    };
+    let time = format!("{}:{:02}:{:02} {}", h12, mi, s, ampm);
+    (date, time)
+}
+
 fn current_date_time() -> (String, String) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

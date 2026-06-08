@@ -802,9 +802,9 @@ pub fn polygon_to_params(p: &Polygon, params: &mut ParameterMap) {
 
 pub fn rule_from_params(params: &ParameterMap) -> Rule {
     let mut r = Rule::default();
-    let mut typed = BTreeMap::new();
+    let mut typed: Vec<(String, String)> = Vec::new();
     for (n, v, _) in params.iter() {
-        typed.insert(n.to_string(), v.to_string());
+        typed.push((n.to_string(), v.to_string()));
     }
     if let Some(v) = params.get("NAME") {
         r.name = v.to_string();
@@ -835,30 +835,40 @@ pub fn rule_from_params(params: &ParameterMap) -> Rule {
 }
 
 pub fn rule_to_params(r: &Rule, params: &mut ParameterMap) {
+    // Typed fields only shadow the original value when the key was
+    // present in the source record — different rule kinds carry
+    // different key sets and we don't want to inject keys (e.g. ENABLED)
+    // a kind doesn't normally emit.
+    let had = |k: &str| {
+        r.parameters
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(k))
+    };
     for (k, v) in &r.parameters {
         params.insert(k, v.clone());
     }
-    // Typed fields override.
-    if !r.name.is_empty() {
+    if !r.name.is_empty() && had("NAME") {
         params.insert("NAME", r.name.clone());
     }
-    if !r.rule_kind.is_empty() {
+    if !r.rule_kind.is_empty() && had("RULEKIND") {
         params.insert("RULEKIND", r.rule_kind.clone());
     }
-    if !r.comment.is_empty() {
+    if !r.comment.is_empty() && had("COMMENT") {
         params.insert("COMMENT", r.comment.clone());
     }
-    if !r.unique_id.is_empty() {
+    if !r.unique_id.is_empty() && had("UNIQUEID") {
         params.insert("UNIQUEID", r.unique_id.clone());
     }
-    params.insert("ENABLED", if r.enabled { "TRUE" } else { "FALSE" });
-    if r.priority != 0 {
+    if had("ENABLED") {
+        params.insert("ENABLED", if r.enabled { "TRUE" } else { "FALSE" });
+    }
+    if r.priority != 0 && had("PRIORITY") {
         params.insert("PRIORITY", r.priority.to_string());
     }
-    if !r.scope1_expression.is_empty() {
+    if !r.scope1_expression.is_empty() && had("SCOPE1EXPRESSION") {
         params.insert("SCOPE1EXPRESSION", r.scope1_expression.clone());
     }
-    if !r.scope2_expression.is_empty() {
+    if !r.scope2_expression.is_empty() && had("SCOPE2EXPRESSION") {
         params.insert("SCOPE2EXPRESSION", r.scope2_expression.clone());
     }
 }
@@ -867,9 +877,9 @@ pub fn rule_to_params(r: &Rule, params: &mut ParameterMap) {
 
 pub fn object_class_from_params(params: &ParameterMap) -> ObjectClass {
     let mut o = ObjectClass::default();
-    let mut typed = BTreeMap::new();
+    let mut typed: Vec<(String, String)> = Vec::new();
     for (n, v, _) in params.iter() {
-        typed.insert(n.to_string(), v.to_string());
+        typed.push((n.to_string(), v.to_string()));
     }
     if let Some(v) = params.get("NAME") {
         o.name = v.to_string();
@@ -905,27 +915,39 @@ pub fn object_class_from_params(params: &ParameterMap) -> ObjectClass {
 }
 
 pub fn object_class_to_params(o: &ObjectClass, params: &mut ParameterMap) {
+    // Same as rule_to_params: typed fields only shadow when the key was
+    // present in the source record.
+    let had = |k: &str| {
+        o.parameters
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(k))
+    };
     for (k, v) in &o.parameters {
         params.insert(k, v.clone());
     }
-    if !o.name.is_empty() {
+    if !o.name.is_empty() && had("NAME") {
         params.insert("NAME", o.name.clone());
     }
-    if !o.super_class.is_empty() {
+    if !o.super_class.is_empty() && had("SUPERCLASS") {
         params.insert("SUPERCLASS", o.super_class.clone());
     }
-    if !o.sub_class.is_empty() {
+    if !o.sub_class.is_empty() && had("SUBCLASS") {
         params.insert("SUBCLASS", o.sub_class.clone());
     }
-    if !o.unique_id.is_empty() {
+    if !o.unique_id.is_empty() && had("UNIQUEID") {
         params.insert("UNIQUEID", o.unique_id.clone());
     }
-    if !o.kind.is_empty() {
+    if !o.kind.is_empty() && had("KIND") {
         params.insert("KIND", o.kind.clone());
     }
-    params.insert("ENABLED", if o.enabled { "TRUE" } else { "FALSE" });
+    if had("ENABLED") {
+        params.insert("ENABLED", if o.enabled { "TRUE" } else { "FALSE" });
+    }
     for (i, m) in o.members.iter().enumerate() {
-        params.insert(format!("MEMBER{i}").as_str(), m.clone());
+        let key = format!("MEMBER{i}");
+        if had(&key) || !o.parameters.is_empty() {
+            params.insert(key.as_str(), m.clone());
+        }
     }
 }
 
@@ -933,9 +955,9 @@ pub fn object_class_to_params(o: &ObjectClass, params: &mut ParameterMap) {
 
 pub fn differential_pair_from_params(params: &ParameterMap) -> DifferentialPair {
     let mut d = DifferentialPair::default();
-    let mut typed = BTreeMap::new();
+    let mut typed: Vec<(String, String)> = Vec::new();
     for (n, v, _) in params.iter() {
-        typed.insert(n.to_string(), v.to_string());
+        typed.push((n.to_string(), v.to_string()));
     }
     if let Some(v) = params.get("NAME") {
         d.name = v.to_string();
@@ -979,9 +1001,9 @@ pub fn differential_pair_to_params(d: &DifferentialPair, params: &mut ParameterM
 
 pub fn room_from_params(params: &ParameterMap) -> Room {
     let mut r = Room::default();
-    let mut typed = BTreeMap::new();
+    let mut typed: Vec<(String, String)> = Vec::new();
     for (n, v, _) in params.iter() {
-        typed.insert(n.to_string(), v.to_string());
+        typed.push((n.to_string(), v.to_string()));
     }
     if let Some(v) = params.get("NAME") {
         r.name = v.to_string();

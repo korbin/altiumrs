@@ -2,8 +2,6 @@
 //! types from the `Rules6`, `Classes6`, `DifferentialPairs6`, and `Rooms6`
 //! storages.
 
-use std::collections::BTreeMap;
-
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +18,10 @@ pub struct Rule {
     pub unique_id: String,
     pub scope1_expression: String,
     pub scope2_expression: String,
-    pub parameters: BTreeMap<String, String>,
+    pub parameters: Vec<(String, String)>,
+    /// Per-record version word preceding the `u32 size` prefix; tags the
+    /// `RULEKIND` enum (e.g. `UnpouredPolygon` = 62). Round-tripped verbatim.
+    pub rule_type_code: u16,
 }
 
 /// A named class (net class, component class, etc.) with its members.
@@ -34,7 +35,7 @@ pub struct ObjectClass {
     pub kind: String,
     pub enabled: bool,
     pub members: Vec<String>,
-    pub parameters: BTreeMap<String, String>,
+    pub parameters: Vec<(String, String)>,
 }
 
 /// Pairs a positive and negative net for differential routing.
@@ -46,7 +47,7 @@ pub struct DifferentialPair {
     pub negative_net_name: String,
     pub unique_id: String,
     pub enabled: bool,
-    pub parameters: BTreeMap<String, String>,
+    pub parameters: Vec<(String, String)>,
 }
 
 /// Physical placement region.
@@ -55,5 +56,5 @@ pub struct DifferentialPair {
 pub struct Room {
     pub name: String,
     pub unique_id: String,
-    pub parameters: BTreeMap<String, String>,
+    pub parameters: Vec<(String, String)>,
 }

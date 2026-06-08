@@ -51,9 +51,10 @@ pub struct Document {
     pub differential_pairs: Vec<DifferentialPair>,
     pub rooms: Vec<Room>,
 
-    /// Raw `Board6` parameters preserved verbatim. `None` means no `Board6`
-    /// storage was present (which is allowed for trivial documents).
-    pub board_parameters: Option<BTreeMap<String, String>>,
+    /// Raw `Board6` parameters in on-disk order. Stored as `Vec` not
+    /// `Map` because Board6 has repeated `RECORD=Board` section markers
+    /// and `\r` separators embedded in values that a map would lose.
+    pub board_parameters: Option<Vec<(String, String)>>,
 
     /// Additional storages/streams we don't model. Keys use
     /// `"StorageName/StreamName"` (or just `"StreamName"` for root streams).
