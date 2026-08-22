@@ -12,6 +12,8 @@ pub struct SvgContext {
     /// Stack of transform group depths so save/restore can close out `<g>`s.
     group_depth: Vec<usize>,
     open_groups: usize,
+    /// The layer whose `<g>` is currently open (for `set_layer` grouping).
+    cur_layer: Option<i32>,
 }
 
 impl SvgContext {
@@ -21,6 +23,7 @@ impl SvgContext {
             options,
             group_depth: Vec::new(),
             open_groups: 0,
+            cur_layer: None,
         }
     }
 
@@ -313,6 +316,9 @@ impl RenderContext for SvgContext {
     }
 
     fn save_state(&mut self) {
+        // The layer group (if any) sits below the transform group opened after
+        // this save, so it survives the matching restore — don't reset it, or
+        // set_layer would leak a fresh group per primitive.
         self.group_depth.push(self.open_groups);
     }
 
@@ -323,6 +329,19 @@ impl RenderContext for SvgContext {
                 self.open_groups -= 1;
             }
         }
+    }
+
+    fn set_layer(&mut self, layer: i32) {
+        if self.cur_layer == Some(layer) {
+            return;
+        }
+        if self.cur_layer.is_some() {
+            self.body.push_str("</g>");
+            self.open_groups -= 1;
+        }
+        let _ = write!(self.body, "<g class=\"ly-{layer}\" data-layer=\"{layer}\">");
+        self.open_groups += 1;
+        self.cur_layer = Some(layer);
     }
 
     fn translate(&mut self, dx: f64, dy: f64) {

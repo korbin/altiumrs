@@ -229,6 +229,11 @@ pub trait RenderContext {
     /// Pop the most recently pushed draw state.
     fn restore_state(&mut self) {}
 
+    /// Tag subsequent primitives as belonging to a board layer (SVG groups them
+    /// as `<g class="ly-N" data-layer="N">` so viewers can toggle visibility /
+    /// opacity per layer). No-op for raster.
+    fn set_layer(&mut self, _layer: i32) {}
+
     /// Translate the current transform by `(dx, dy)`.
     fn translate(&mut self, dx: f64, dy: f64) {
         let _ = (dx, dy);

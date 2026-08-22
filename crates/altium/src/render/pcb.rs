@@ -503,6 +503,7 @@ pub fn render_component<C: RenderContext>(ctx: &mut C, component: &Component, t:
     collect_component(component, &mut prims, true);
     prims.sort_by_key(|p| p.priority_key());
     for p in &prims {
+        ctx.set_layer(p.layer());
         p.draw(ctx, t);
     }
 }
@@ -538,6 +539,7 @@ fn render_document_inner<C: RenderContext>(
     collect_document(document, &mut prims);
     prims.sort_by_key(|p| p.priority_key());
     for p in &prims {
+        ctx.set_layer(p.layer());
         p.draw(ctx, t);
     }
 
