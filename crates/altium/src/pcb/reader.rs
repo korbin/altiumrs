@@ -917,8 +917,8 @@ fn read_text<R: Read + Seek>(
     let mut font_bold = false;
     let mut font_italic = false;
     let mut font_name: Option<String> = None;
-    let mut barcode_lr_margin = 0i32;
-    let mut barcode_tb_margin = 0i32;
+    let barcode_lr_margin = 0i32;
+    let barcode_tb_margin = 0i32;
     let mut font_inverted = false;
     let mut font_inverted_border = 0i32;
     let mut wide_string_index = -1i32;
@@ -936,16 +936,10 @@ fn read_text<R: Read + Seek>(
         font_bold = br.read_u8()? != 0;
         font_italic = br.read_u8()? != 0;
         font_name = Some(br.read_font_name()?);
-        barcode_lr_margin = br.read_i32()?;
-        barcode_tb_margin = br.read_i32()?;
-        br.skip(4)?; // ext3
-        br.skip(4)?; // ext4
-        br.read_u8()?;
-        br.read_u8()?;
-        br.skip(4)?;
-        br.skip(2)?;
-        br.skip(4)?;
-        br.skip(4)?;
+        // The inverted/wide-string fields follow the font name directly
+        // (subrecord offsets 110..137, matching real Altium output and
+        // KiCad's importer); barcode fields live in an optional tail that
+        // the trailing skip below consumes.
         font_inverted = br.read_u8()? != 0;
         font_inverted_border = br.read_i32()?;
         wide_string_index = br.read_i32()?;
@@ -1485,15 +1479,46 @@ fn read_doc_wide_strings(cf: &mut CompoundFile) -> Result<Vec<String>> {
     if data.is_empty() {
         return Ok(Vec::new());
     }
-    let mut br = BinaryReader::new(Cursor::new(data))?;
-    let map = read_param_map(&mut br)?;
-    let mut out = Vec::new();
-    for i in 0.. {
-        let key = format!("ENCODEDTEXT{i}");
-        let Some(encoded) = map.get(&key) else {
-            break;
+    // Older writers (and footprint sections) used the ENCODEDTEXT parameter
+    // map; documents proper use a binary [u32 index][u32 len][UTF-16LE]
+    // table. A parameter block always starts its payload with '|'.
+    if data.len() >= 5 && data[4] == b'|' {
+        let mut br = BinaryReader::new(Cursor::new(data))?;
+        let map = read_param_map(&mut br)?;
+        let mut out = Vec::new();
+        for i in 0.. {
+            let key = format!("ENCODEDTEXT{i}");
+            let Some(encoded) = map.get(&key) else {
+                break;
+            };
+            out.push(decode_wide_string(encoded));
+        }
+        return Ok(out);
+    }
+    let mut out = Vec::<String>::new();
+    let mut pos = 0usize;
+    while pos + 8 <= data.len() {
+        let index = u32::from_le_bytes(data[pos..pos + 4].try_into().unwrap()) as usize;
+        let len = u32::from_le_bytes(data[pos + 4..pos + 8].try_into().unwrap()) as usize;
+        pos += 8;
+        let text = if len <= 2 {
+            // Empty strings carry no bytes, not even the NUL.
+            String::new()
+        } else {
+            if pos + len > data.len() {
+                break;
+            }
+            let units: Vec<u16> = data[pos..pos + len - 2]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            pos += len;
+            String::from_utf16_lossy(&units)
         };
-        out.push(decode_wide_string(encoded));
+        if index >= out.len() {
+            out.resize(index + 1, String::new());
+        }
+        out[index] = text;
     }
     Ok(out)
 }

@@ -587,6 +587,9 @@ fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()>
         w.write_f64(arc.start_angle)?;
         w.write_f64(arc.end_angle)?;
         w.write_i32(arc.width.to_raw())?;
+        // Sub-polygon index (0xFFFF = standalone); KiCad reads it
+        // unconditionally, same as for tracks.
+        w.write_u16(0xFFFF)?;
         Ok(())
     })
 }
@@ -769,16 +772,30 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
         .encode();
         // Net + component indexes go in the common prefix. Altium ignores
         // the trailing copies some old writers (and our old reader) wrote.
+        // `Track.component_index` is a u8 that can't hold the -1 "free"
+        // sentinel the other primitives use; 0 means free here, and must
+        // map to the on-disk no-component word or importers try to attach
+        // the track to component #0.
+        let component = if track.component_index == 0 {
+            -1
+        } else {
+            i32::from(track.component_index)
+        };
         write_common_prefix_full(
             w,
             track.layer as u8,
             flags,
             track.net_index as i32,
-            track.component_index as i32,
+            component,
         )?;
         write_coord_point(w, track.start)?;
         write_coord_point(w, track.end)?;
         w.write_i32(track.width.to_raw())?;
+        // Sub-polygon index (0xFFFF = standalone) plus one pad byte. Real
+        // Altium always emits these and KiCad's importer reads them
+        // unconditionally — without them its Tracks6 parse fails.
+        w.write_u16(0xFFFF)?;
+        w.write_u8(0)?;
         Ok(())
     })
 }
@@ -816,16 +833,9 @@ fn write_text<W: Write + Seek>(
         w.write_u8(if text.font_bold { 1 } else { 0 })?;
         w.write_u8(if text.font_italic { 1 } else { 0 })?;
         w.write_font_name(text.font_name.as_deref().unwrap_or("Arial"))?;
-        w.write_i32(text.barcode_lr_margin.to_raw())?;
-        w.write_i32(text.barcode_tb_margin.to_raw())?;
-        w.write_i32(0)?;
-        w.write_i32(0)?;
-        w.write_u8(0)?;
-        w.write_u8(0)?;
-        w.write_i32(0)?;
-        w.write_i16(0)?;
-        w.write_i32(1)?;
-        w.write_i32(0)?;
+        // The inverted/wide-string fields follow the font name directly
+        // (subrecord byte offsets 110..137, the layout KiCad's importer
+        // expects); barcode fields live in an optional tail we don't emit.
         w.write_u8(if text.is_inverted { 1 } else { 0 })?;
         w.write_i32(text.inverted_border.to_raw())?;
         w.write_i32(wide_string_index)?;
@@ -1660,20 +1670,24 @@ fn write_doc_wide_strings(cf: &mut CompoundFile, document: &Document) -> Result<
     }
     cf.create_storage("WideStrings6")?;
     write_storage_header(cf, "WideStrings6/Header", 1)?;
-    let mut buf = Cursor::new(Vec::<u8>::new());
-    let mut bw = BinaryWriter::new(&mut buf);
-    let mut params = ParameterMap::new();
+    // Documents store wide strings as a binary index table:
+    // [u32 index][u32 byte_len][UTF-16LE chars + NUL], one entry per text.
+    // (The ENCODEDTEXT parameter-map flavor is only used inside footprint
+    // sections.) Empty strings carry no bytes, not even the NUL.
+    let mut out = Vec::<u8>::new();
     for (i, text) in document.texts.iter().enumerate() {
-        let encoded = text
-            .text
-            .chars()
-            .map(|c| (c as u32).to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        params.insert(format!("ENCODEDTEXT{i}").as_str(), encoded);
+        out.extend_from_slice(&(i as u32).to_le_bytes());
+        if text.text.is_empty() {
+            out.extend_from_slice(&0u32.to_le_bytes());
+            continue;
+        }
+        let units: Vec<u16> = text.text.encode_utf16().chain(std::iter::once(0)).collect();
+        out.extend_from_slice(&((units.len() * 2) as u32).to_le_bytes());
+        for unit in units {
+            out.extend_from_slice(&unit.to_le_bytes());
+        }
     }
-    write_c_string_param_block(&mut bw, &params)?;
-    cf.write_stream("WideStrings6/Data", &buf.into_inner())?;
+    cf.write_stream("WideStrings6/Data", &out)?;
     Ok(())
 }
 

@@ -57,7 +57,9 @@ impl PrimitiveFlags {
 pub(crate) struct CommonPrefix {
     pub layer: u8,
     pub flags: u16,
-    /// Net index into the `Nets6` table (`-1` for "no net").
+    /// Net index into the `Nets6` table, using the in-memory 1-based
+    /// convention (`0` for "no net"). On disk the index is 0-based with
+    /// `0xFFFF` as the sentinel; the codec translates at the boundary.
     pub net_index: i32,
     /// Component index into the `Components6` table (`-1` for free primitives).
     pub component_index: i32,
@@ -77,9 +79,9 @@ pub(crate) fn read_common_prefix<R: Read + Seek>(
     let component_raw = reader.read_u16()?;
     reader.skip(4)?; // remaining reserved
     let net_index = if net_raw == 0xFFFF {
-        -1
+        0
     } else {
-        net_raw as i32
+        i32::from(net_raw) + 1
     };
     let component_index = if component_raw == 0xFFFF {
         -1
@@ -115,8 +117,10 @@ pub(crate) fn write_common_prefix_full<W: Write + Seek>(
 ) -> Result<()> {
     writer.write_u8(layer)?;
     writer.write_u16(flags)?;
-    let net_word: u16 = if (0..=0xFFFE).contains(&net_index) {
-        net_index as u16
+    // Inverse of the read-side translation: in-memory 1-based (0 = none)
+    // to on-disk 0-based (0xFFFF = none).
+    let net_word: u16 = if (1..=0xFFFF).contains(&net_index) {
+        (net_index - 1) as u16
     } else {
         0xFFFF
     };
