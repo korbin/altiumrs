@@ -155,9 +155,14 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
         consumed.push("LOCKSTRINGS");
     }
 
-    // COMPONENTKIND is read but not consumed: it passes through
-    // `additional_parameters` verbatim (not every record carries it).
+    // Component type. Modern files store it in COMPONENTKINDVERSION2
+    // (TComponentKind ordinals; 5 = Standard (No BOM)) while keeping a
+    // legacy COMPONENTKIND alongside — the V2 key is authoritative. Both
+    // pass through `additional_parameters` verbatim.
     if let Some(v) = params.get_i32("COMPONENTKIND") {
+        c.component_kind = v;
+    }
+    if let Some(v) = params.get_i32("COMPONENTKINDVERSION2") {
         c.component_kind = v;
     }
     if let Some(v) = get_bool_explicit(params, "ENABLED") {
@@ -254,8 +259,21 @@ pub fn component_to_params(component: &Component, params: &mut ParameterMap) {
     if component.lock_strings {
         params.insert("LOCKSTRINGS", "TRUE");
     }
-    if component.component_kind != 0 {
-        params.insert("COMPONENTKIND", component.component_kind.to_string());
+    // File-loaded components carry their kind keys via passthrough; only
+    // from-scratch ones need them derived (legacy key knows 0..2 only).
+    if component.component_kind != 0
+        && !params.contains_key("COMPONENTKIND")
+        && !params.contains_key("COMPONENTKINDVERSION2")
+    {
+        let legacy = match component.component_kind {
+            1 | 2 => component.component_kind,
+            _ => 0,
+        };
+        params.insert("COMPONENTKIND", legacy.to_string());
+        params.insert(
+            "COMPONENTKINDVERSION2",
+            component.component_kind.to_string(),
+        );
     }
     if !component.enabled {
         params.insert("ENABLED", "FALSE");

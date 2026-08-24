@@ -59,7 +59,10 @@ pub struct Track {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
 }
 
@@ -173,7 +176,10 @@ pub struct Arc {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
 }
 
@@ -376,8 +382,10 @@ pub struct Pad {
     /// designator and the net-string blocks. Real Altium emits a single zero
     /// byte; capture-and-replay preserves any payload Altium has put there in
     /// a future format revision so we don't silently strip it.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64"))]
     pub reserved_block_after_designator: Vec<u8>,
     /// Verbatim bytes of the reserved block that follows the net string.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64"))]
     pub reserved_block_after_net_string: Vec<u8>,
     /// The pad's net-string block, typically `"|&|0"` in real Altium files.
     pub net_string_block: String,
@@ -385,10 +393,16 @@ pub struct Pad {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
     /// Original size/shape block bytes (see `raw_record`).
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_size_shape: Option<Vec<u8>>,
 }
 
@@ -593,7 +607,10 @@ pub struct Via {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
 }
 
@@ -711,7 +728,10 @@ pub struct Fill {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
 }
 
@@ -842,7 +862,10 @@ pub struct Region {
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
     /// writer patches the typed fields above into this buffer when present.
-    #[cfg_attr(feature = "serde", serde(skip))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+    )]
     pub raw_record: Option<Vec<u8>>,
 }
 
@@ -1199,6 +1222,7 @@ pub struct ComponentBody {
     pub model_name: Option<String>,
     pub model_checksum: i32,
     pub model_source: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_opt"))]
     pub step_model_data: Option<Vec<u8>>,
 
     pub enabled: bool,

@@ -101,12 +101,15 @@ pub struct IntegratedLibrary {
     /// `.PcbLib` files embedded in the container.
     pub footprint_libraries: Vec<NamedLibrary<pcb::Library>>,
     /// Raw bytes of `LibCrossRef.Txt`. Preserved verbatim for round-trip.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_opt"))]
     pub cross_reference: Option<Vec<u8>>,
     /// Raw bytes of `Parameters   .bin`. Preserved verbatim for round-trip.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_opt"))]
     pub parameters_bin: Option<Vec<u8>>,
     /// Streams not handled by any typed field above. Datasheets, simulation
     /// models, or unrecognised layout variants land here under their full
     /// stream path.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_files: BTreeMap<String, Vec<u8>>,
     /// Parameter block from a root-level `FileHeader` stream, when the
     /// IntLib carries one (rare; produced by some non-Altium tooling).

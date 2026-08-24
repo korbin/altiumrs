@@ -138,6 +138,32 @@ pub struct ParameterMap {
     entries: Vec<Entry>,
 }
 
+#[cfg(feature = "serde")]
+impl serde::Serialize for ParameterMap {
+    /// Ordered `[name, value, is_utf8]` triples — preserves insertion order
+    /// and original casing exactly.
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.collect_seq(self.entries.iter().map(|e| (&e.name, &e.value, e.is_utf8)))
+    }
+}
+
+#[cfg(feature = "serde")]
+impl<'de> serde::Deserialize<'de> for ParameterMap {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let entries = Vec::<(String, String, bool)>::deserialize(d)?;
+        let mut map = ParameterMap::default();
+        for (name, value, is_utf8) in entries {
+            map.index.insert(name.to_uppercase(), map.entries.len());
+            map.entries.push(Entry {
+                name,
+                value,
+                is_utf8,
+            });
+        }
+        Ok(map)
+    }
+}
+
 impl ParameterMap {
     /// Empty map.
     pub fn new() -> Self {

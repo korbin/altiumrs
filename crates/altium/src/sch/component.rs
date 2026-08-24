@@ -22,6 +22,7 @@ use crate::coord::{Coord, CoordPoint, CoordRect};
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RawRecord {
     pub flag: u8,
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64"))]
     pub bytes: Vec<u8>,
 }
 
@@ -122,6 +123,7 @@ pub struct Component {
     pub raw_records: Vec<RawRecord>,
     /// Streams beneath the component's storage that we don't model (e.g.
     /// `PinFrac`, `PinSymbolLineWidth`, `PinTextData`).
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_streams: BTreeMap<String, Vec<u8>>,
 }
 

@@ -32,8 +32,10 @@ pub struct Library {
 
     /// Additional streams beneath `Library/` (e.g. `ComponentParamsTOC`,
     /// `EmbeddedFonts`, `PadViaLibrary`).
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_library_streams: BTreeMap<String, Vec<u8>>,
     /// Additional root-level storages (e.g. `FileVersionInfo`).
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_root_streams: BTreeMap<String, Vec<u8>>,
 }
 

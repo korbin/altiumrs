@@ -28,11 +28,14 @@ pub struct Library {
     pub font_override: Option<String>,
     /// Embedded image bytes from the `Storage` stream, in the order the file
     /// stored them. Image records reference these positionally.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_list"))]
     pub embedded_images: Vec<Vec<u8>>,
     /// Raw `Storage` stream bytes preserved for round-trip when we can't
     /// re-emit them losslessly.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_opt"))]
     pub raw_storage_stream: Option<Vec<u8>>,
     /// Other root-level streams we don't model.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_root_streams: BTreeMap<String, Vec<u8>>,
 }
 

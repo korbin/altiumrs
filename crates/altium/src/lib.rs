@@ -17,10 +17,13 @@ pub mod intlib;
 pub mod libpkg;
 pub mod netlist;
 pub mod parameter;
+pub mod pnp;
 pub mod pcb;
 #[cfg(feature = "render")]
 pub mod render;
 pub mod sch;
+#[cfg(feature = "serde")]
+pub mod serde_bytes;
 
 /// Derives `from_params` / `to_params` on a struct of named fields.
 pub use altium_derive::AltiumRecord;

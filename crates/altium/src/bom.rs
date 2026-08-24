@@ -27,6 +27,7 @@ pub mod kinds {
 /// One line of the document. Generic — every record kind is stored the same
 /// way, then projected through typed views ([`BomHeader`], [`BomItem`], …).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BomRecord {
     /// `RECORD=` value (e.g. `"BOM"`, `"CatalogItem"`, `"GeneralOptions"`).
     pub kind: String,
@@ -53,6 +54,7 @@ impl BomRecord {
 
 /// Top-level BomDoc.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BomDocument {
     pub records: Vec<BomRecord>,
 }

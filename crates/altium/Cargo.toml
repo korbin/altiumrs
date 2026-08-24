@@ -9,7 +9,7 @@ description = "Read and write Altium Designer files (.SchLib, .SchDoc, .PcbLib, 
 
 [features]
 default = []
-serde = ["dep:serde", "dep:serde_repr"]
+serde = ["dep:serde", "dep:serde_repr", "dep:base64"]
 render = ["dep:tiny-skia", "dep:cosmic-text", "dep:fontdb"]
 
 [dependencies]
@@ -23,6 +23,7 @@ byteorder.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
 serde = { workspace = true, optional = true }
 serde_repr = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
 tiny-skia = { workspace = true, optional = true }
 cosmic-text = { workspace = true, optional = true }
 fontdb = { workspace = true, optional = true }

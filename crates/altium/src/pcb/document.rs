@@ -58,6 +58,7 @@ pub struct Document {
 
     /// Additional storages/streams we don't model. Keys use
     /// `"StorageName/StreamName"` (or just `"StreamName"` for root streams).
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_streams: BTreeMap<String, Vec<u8>>,
 }
 

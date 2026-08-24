@@ -64,6 +64,7 @@ pub struct Document {
     /// reader encountered them so writes can replay them in position.
     pub raw_records: Vec<super::component::RawRecord>,
     /// Storages/streams we don't model.
+    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_streams: BTreeMap<String, Vec<u8>>,
     /// Records we couldn't classify; kept so writes stay byte-for-byte close.
     pub opaque_records: Vec<BTreeMap<String, String>>,

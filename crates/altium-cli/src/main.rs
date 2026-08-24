@@ -102,6 +102,51 @@ enum Command {
         #[arg(long)]
         name: Option<String>,
     },
+    /// Serialize any supported Altium file to JSON: `{"kind": ..,
+    /// "document": ..}` with binary blobs as base64 strings.
+    ToJson {
+        /// Source file (`.PcbDoc`, `.SchDoc`, `.PcbLib`, `.SchLib`,
+        /// `.IntLib`, `.LibPkg`, `.BomDoc`).
+        path: PathBuf,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Single-line output instead of pretty-printed.
+        #[arg(long)]
+        compact: bool,
+    },
+    /// Rebuild an Altium file from `to-json` output.
+    FromJson {
+        /// JSON produced by `to-json`.
+        path: PathBuf,
+        /// Destination file; its format follows the JSON `kind`.
+        #[arg(short, long)]
+        output: PathBuf,
+    },
+    /// Export pick-and-place (centroid) data from a `.PcbDoc` as CSV.
+    /// Coordinates are board-origin-relative; rotation uses Altium's
+    /// convention on both sides.
+    Pnp {
+        /// Source `.PcbDoc`.
+        path: PathBuf,
+        /// Output file. Defaults to stdout.
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+        /// Dialect: `altium` (default), `jlc`, or `kicad`.
+        #[arg(long, default_value = "altium")]
+        format: String,
+        /// Units: `mm` (default) or `mil`.
+        #[arg(long, default_value = "mm")]
+        units: String,
+        /// Keep absolute workspace coordinates.
+        #[arg(long)]
+        absolute: bool,
+        /// Also list Standard (No BOM) components. Like Altium's built-in
+        /// export, only Standard components are listed by default; other
+        /// kinds (mechanical, graphical, net ties, jumpers) never appear.
+        #[arg(long)]
+        include_no_bom: bool,
+    },
 }
 
 #[tokio::main]
@@ -130,6 +175,20 @@ async fn main() -> Result<()> {
             output,
             search_path,
         } => cmd_flatten(&path, output.as_deref(), &search_path).await,
+        Command::ToJson {
+            path,
+            output,
+            compact,
+        } => cmd_to_json(&path, output.as_deref(), compact).await,
+        Command::FromJson { path, output } => cmd_from_json(&path, &output).await,
+        Command::Pnp {
+            path,
+            output,
+            format,
+            units,
+            absolute,
+            include_no_bom,
+        } => cmd_pnp(&path, output.as_deref(), &format, &units, absolute, include_no_bom).await,
         Command::Split {
             path,
             out_dir,
@@ -501,6 +560,118 @@ async fn cmd_inspect(path: &Path, component: Option<&str>) -> Result<()> {
     };
     println!("{}", serde_json::to_string_pretty(&summary)?);
     Ok(())
+}
+
+/// Print or write `text`, following the CLI's stdout-by-default convention.
+fn emit_output(output: Option<&Path>, text: &str) -> Result<()> {
+    match output {
+        Some(p) => {
+            std::fs::write(p, text).with_context(|| format!("write {}", p.display()))?;
+            println!("wrote {}", p.display());
+        }
+        None => print!("{text}"),
+    }
+    Ok(())
+}
+
+async fn cmd_to_json(path: &Path, output: Option<&Path>, compact: bool) -> Result<()> {
+    let file = AltiumFile::read(path).await?;
+    let value = match &file {
+        AltiumFile::PcbDocument(d) => json!({"kind": "PcbDocument", "document": d}),
+        AltiumFile::PcbLibrary(d) => json!({"kind": "PcbLibrary", "document": d}),
+        AltiumFile::SchDocument(d) => json!({"kind": "SchDocument", "document": d}),
+        AltiumFile::SchLibrary(d) => json!({"kind": "SchLibrary", "document": d}),
+        AltiumFile::IntegratedLibrary(d) => json!({"kind": "IntegratedLibrary", "document": d}),
+        AltiumFile::LibraryPackage(d) => json!({"kind": "LibraryPackage", "document": d}),
+        AltiumFile::BomDocument(d) => json!({"kind": "BomDocument", "document": d}),
+    };
+    let mut text = if compact {
+        serde_json::to_string(&value)?
+    } else {
+        serde_json::to_string_pretty(&value)?
+    };
+    text.push('\n');
+    emit_output(output, &text)
+}
+
+async fn cmd_from_json(path: &Path, output: &Path) -> Result<()> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&text)?;
+    let kind = value
+        .get("kind")
+        .and_then(|k| k.as_str())
+        .ok_or_else(|| anyhow!("missing \"kind\" field — is this `to-json` output?"))?
+        .to_string();
+    let document = value
+        .get_mut("document")
+        .ok_or_else(|| anyhow!("missing \"document\" field"))?
+        .take();
+    let bytes = match kind.as_str() {
+        "PcbDocument" => serde_json::from_value::<pcb::Document>(document)?.to_bytes()?,
+        "PcbLibrary" => serde_json::from_value::<pcb::Library>(document)?.to_bytes()?,
+        "SchDocument" => serde_json::from_value::<sch::Document>(document)?.to_bytes()?,
+        "SchLibrary" => serde_json::from_value::<sch::Library>(document)?.to_bytes()?,
+        "IntegratedLibrary" => {
+            serde_json::from_value::<altium::IntegratedLibrary>(document)?.to_bytes()?
+        }
+        "LibraryPackage" => {
+            let pkg = serde_json::from_value::<altium::LibraryPackage>(document)?;
+            pkg.write(output).await?;
+            println!("wrote {}", output.display());
+            return Ok(());
+        }
+        "BomDocument" => serde_json::from_value::<altium::BomDocument>(document)?.to_bytes()?,
+        other => return Err(anyhow!("unsupported kind {other:?}")),
+    };
+    tokio::fs::write(output, bytes)
+        .await
+        .with_context(|| format!("write {}", output.display()))?;
+    println!("wrote {}", output.display());
+    Ok(())
+}
+
+async fn cmd_pnp(
+    path: &Path,
+    output: Option<&Path>,
+    format: &str,
+    units: &str,
+    absolute: bool,
+    include_no_bom: bool,
+) -> Result<()> {
+    use altium::pnp::{PnpFormat, PnpUnits, format_pnp_csv, pnp_entries};
+
+    let file = AltiumFile::read(path).await?;
+    let AltiumFile::PcbDocument(doc) = file else {
+        return Err(anyhow!("pnp requires a .PcbDoc"));
+    };
+    let format = match format.to_ascii_lowercase().as_str() {
+        "altium" => PnpFormat::Altium,
+        "jlc" => PnpFormat::Jlc,
+        "kicad" => PnpFormat::Kicad,
+        other => return Err(anyhow!("unknown format {other:?} (altium|jlc|kicad)")),
+    };
+    let units = match units.to_ascii_lowercase().as_str() {
+        "mm" => PnpUnits::Mm,
+        "mil" => PnpUnits::Mil,
+        other => return Err(anyhow!("unknown units {other:?} (mm|mil)")),
+    };
+    let entries = pnp_entries(&doc, absolute, include_no_bom);
+    let skipped = doc.components.len() - entries.len();
+    if skipped > 0 {
+        eprintln!(
+            "note: {skipped} component(s) excluded by kind{}",
+            if include_no_bom {
+                ""
+            } else {
+                " (--include-no-bom lists Standard (No BOM) parts)"
+            }
+        );
+    }
+    let missing = entries.iter().filter(|e| e.designator.is_empty()).count();
+    if missing > 0 {
+        eprintln!("note: {missing} component(s) have no designator (blank in output)");
+    }
+    emit_output(output, &format_pnp_csv(&entries, format, units))
 }
 
 async fn cmd_flatten(
