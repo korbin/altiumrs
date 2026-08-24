@@ -9,7 +9,8 @@ use flate2::write::ZlibEncoder;
 use tokio::io::AsyncWrite;
 
 use super::binary::{
-    PrimitiveFlags, layer_byte_to_name, layer_name_to_byte, write_common_prefix,
+    PrimitiveFlags, layer_byte_to_name, layer_name_to_byte, patch_common_prefix, patch_f64,
+    patch_i32, patch_point, patch_u8,
     write_common_prefix_full, write_coord_point,
 };
 use super::component::Component;
@@ -573,6 +574,30 @@ fn write_c_string_param_block<W: Write + Seek>(
 // Primitive writers
 
 fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()> {
+    if let Some(raw) = &arc.raw_record {
+        let mut b = raw.clone();
+        patch_common_prefix(
+            &mut b,
+            arc.layer as u8,
+            PrimitiveFlags {
+                is_locked: arc.is_locked,
+                is_tenting_top: arc.is_tenting_top,
+                is_tenting_bottom: arc.is_tenting_bottom,
+                is_keepout: arc.is_keepout,
+            },
+            arc.net_index as i32,
+            arc.component_index,
+        );
+        patch_point(&mut b, 13, arc.center);
+        patch_i32(&mut b, 21, arc.radius.to_raw());
+        patch_f64(&mut b, 25, arc.start_angle);
+        patch_f64(&mut b, 33, arc.end_angle);
+        patch_i32(&mut b, 41, arc.width.to_raw());
+        return bw.write_block(|w| {
+            w.write_bytes(&b)?;
+            Ok(())
+        });
+    }
     bw.write_block(|w| {
         let flags = PrimitiveFlags {
             is_locked: arc.is_locked,
@@ -581,7 +606,13 @@ fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()>
             is_keepout: arc.is_keepout,
         }
         .encode();
-        write_common_prefix_full(w, arc.layer as u8, flags, arc.net_index as i32, -1)?;
+        write_common_prefix_full(
+            w,
+            arc.layer as u8,
+            flags,
+            arc.net_index as i32,
+            arc.component_index,
+        )?;
         write_coord_point(w, arc.center)?;
         w.write_i32(arc.radius.to_raw())?;
         w.write_f64(arc.start_angle)?;
@@ -605,6 +636,38 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         w.write_bytes(&pad.reserved_block_after_net_string)?;
         Ok(())
     })?;
+
+    // Raw path: patch the mutable fields into the original main block.
+    if let Some(raw) = &pad.raw_record {
+        let mut b = raw.clone();
+        patch_common_prefix(
+            &mut b,
+            pad.layer as u8,
+            PrimitiveFlags {
+                is_locked: pad.is_locked,
+                is_tenting_top: pad.is_tenting_top,
+                is_tenting_bottom: pad.is_tenting_bottom,
+                is_keepout: pad.is_keepout,
+            },
+            pad.net_index as i32,
+            pad.component_index,
+        );
+        patch_point(&mut b, 13, pad.location);
+        patch_f64(&mut b, 52, pad.rotation);
+        bw.write_block(|w| {
+            w.write_bytes(&b)?;
+            Ok(())
+        })?;
+        // Mirror the original size/shape block exactly — including the
+        // empty-block case (header only), which some pads carry.
+        return match &pad.raw_size_shape {
+            Some(ss) => bw.write_block(|w| {
+                w.write_bytes(ss)?;
+                Ok(())
+            }),
+            None => bw.write_block(|_| Ok(())),
+        };
+    }
 
     // Pad main block is 202 bytes; the trailing bytes after our typed
     // fields are zero-padded. Writing a shorter block desyncs subsequent
@@ -670,8 +733,12 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         Ok(())
     })?;
 
-    // Always emit the 596-byte size/shape block — Altium reads it on
-    // every pad regardless of `mode`, and omitting it desyncs Pads6.
+    write_pad_size_shape_block(bw, pad)
+}
+
+/// The 596-byte size/shape block — Altium reads it on every pad
+/// regardless of `mode`, and omitting it desyncs Pads6.
+fn write_pad_size_shape_block<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()> {
     bw.write_block(|w| {
         for v in &pad.layer_x_sizes {
             w.write_i32(*v)?;
@@ -705,6 +772,30 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
 }
 
 fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()> {
+    if let Some(raw) = &via.raw_record {
+        let mut b = raw.clone();
+        patch_common_prefix(
+            &mut b,
+            via.layer as u8,
+            PrimitiveFlags {
+                is_locked: via.is_locked,
+                is_tenting_top: via.is_tenting_top,
+                is_tenting_bottom: via.is_tenting_bottom,
+                is_keepout: via.is_keepout,
+            },
+            via.net_index as i32,
+            via.component_index,
+        );
+        patch_point(&mut b, 13, via.location);
+        patch_i32(&mut b, 21, via.diameter.to_raw());
+        patch_i32(&mut b, 25, via.hole_size.to_raw());
+        patch_u8(&mut b, 29, via.start_layer as u8);
+        patch_u8(&mut b, 30, via.end_layer as u8);
+        return bw.write_block(|w| {
+            w.write_bytes(&b)?;
+            Ok(())
+        });
+    }
     // Via record block is 360 bytes; trailing bytes after our typed
     // fields are zero-padded. A shorter block desyncs Vias6.
     const VIA_BLOCK_TOTAL: usize = 360;
@@ -762,6 +853,28 @@ fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()>
 }
 
 fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Result<()> {
+    if let Some(raw) = &track.raw_record {
+        let mut b = raw.clone();
+        patch_common_prefix(
+            &mut b,
+            track.layer as u8,
+            PrimitiveFlags {
+                is_locked: track.is_locked,
+                is_tenting_top: track.is_tenting_top,
+                is_tenting_bottom: track.is_tenting_bottom,
+                is_keepout: track.is_keepout,
+            },
+            track.net_index as i32,
+            track.component_index,
+        );
+        patch_point(&mut b, 13, track.start);
+        patch_point(&mut b, 21, track.end);
+        patch_i32(&mut b, 29, track.width.to_raw());
+        return bw.write_block(|w| {
+            w.write_bytes(&b)?;
+            Ok(())
+        });
+    }
     bw.write_block(|w| {
         let flags = PrimitiveFlags {
             is_locked: track.is_locked,
@@ -770,23 +883,12 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
             is_keepout: track.is_keepout,
         }
         .encode();
-        // Net + component indexes go in the common prefix. Altium ignores
-        // the trailing copies some old writers (and our old reader) wrote.
-        // `Track.component_index` is a u8 that can't hold the -1 "free"
-        // sentinel the other primitives use; 0 means free here, and must
-        // map to the on-disk no-component word or importers try to attach
-        // the track to component #0.
-        let component = if track.component_index == 0 {
-            -1
-        } else {
-            i32::from(track.component_index)
-        };
         write_common_prefix_full(
             w,
             track.layer as u8,
             flags,
             track.net_index as i32,
-            component,
+            track.component_index,
         )?;
         write_coord_point(w, track.start)?;
         write_coord_point(w, track.end)?;
@@ -851,6 +953,28 @@ fn write_text<W: Write + Seek>(
 }
 
 fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<()> {
+    if let Some(raw) = &fill.raw_record {
+        let mut b = raw.clone();
+        patch_common_prefix(
+            &mut b,
+            fill.layer as u8,
+            PrimitiveFlags {
+                is_locked: fill.is_locked,
+                is_tenting_top: fill.is_tenting_top,
+                is_tenting_bottom: fill.is_tenting_bottom,
+                is_keepout: fill.is_keepout,
+            },
+            fill.net_index as i32,
+            fill.component_index,
+        );
+        patch_point(&mut b, 13, fill.corner1);
+        patch_point(&mut b, 21, fill.corner2);
+        patch_f64(&mut b, 29, fill.rotation);
+        return bw.write_block(|w| {
+            w.write_bytes(&b)?;
+            Ok(())
+        });
+    }
     bw.write_block(|w| {
         let flags = PrimitiveFlags {
             is_locked: fill.is_locked,
@@ -859,7 +983,13 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
             is_keepout: fill.is_keepout,
         }
         .encode();
-        write_common_prefix_full(w, fill.layer as u8, flags, fill.net_index as i32, -1)?;
+        write_common_prefix_full(
+            w,
+            fill.layer as u8,
+            flags,
+            fill.net_index as i32,
+            fill.component_index,
+        )?;
         write_coord_point(w, fill.corner1)?;
         write_coord_point(w, fill.corner2)?;
         w.write_f64(fill.rotation)?;
@@ -867,7 +997,123 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
     })
 }
 
+
+/// Rebuild a region record from its raw bytes: patch the common prefix,
+/// keep the parameter block verbatim, re-emit outline + holes from the
+/// typed fields, and append whatever followed the geometry unchanged.
+/// Returns `None` when the raw buffer doesn't parse (caller falls back to
+/// the structured writer).
+fn splice_region_raw(raw: &[u8], region: &Region) -> Option<Vec<u8>> {
+    if raw.len() < 22 {
+        return None;
+    }
+    let plen = u32::from_le_bytes(raw[18..22].try_into().ok()?) as usize;
+    let geo_start = 22usize.checked_add(plen)?;
+    if geo_start + 4 > raw.len() {
+        return None;
+    }
+    // Walk the original geometry to find the residual tail.
+    let mut off = geo_start;
+    let read_u32 = |o: usize| -> Option<usize> {
+        raw.get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize)
+    };
+    let n = read_u32(off)?;
+    off = off.checked_add(4 + n * 16)?;
+    for _ in 0..region.holes.len() {
+        if off + 4 > raw.len() {
+            break;
+        }
+        let n = read_u32(off)?;
+        off = off.checked_add(4 + n * 16)?;
+    }
+    if off > raw.len() {
+        return None;
+    }
+
+    let mut b = raw[..geo_start].to_vec();
+    patch_common_prefix(
+        &mut b,
+        region.layer as u8,
+        PrimitiveFlags {
+            is_locked: region.is_locked,
+            is_tenting_top: region.is_tenting_top,
+            is_tenting_bottom: region.is_tenting_bottom,
+            is_keepout: region.is_keepout,
+        },
+        region.net_index as i32,
+        region.component_index,
+    );
+    // Original vertices are f64 with sub-integer precision the typed model
+    // can't hold. When the geometry is unchanged (to integer precision),
+    // reuse the original bytes verbatim; only a real transform rebuilds.
+    let geometry_unchanged = {
+        let mut o = geo_start;
+        let mut matches = true;
+        let mut check_list = |o: &mut usize, verts: &[crate::coord::CoordPoint]| -> bool {
+            let Some(n) = read_u32(*o) else { return false };
+            *o += 4;
+            if n != verts.len() {
+                return false;
+            }
+            for p in verts {
+                let (Some(xb), Some(yb)) = (raw.get(*o..*o + 8), raw.get(*o + 8..*o + 16)) else {
+                    return false;
+                };
+                let x = f64::from_le_bytes(xb.try_into().unwrap()) as i32;
+                let y = f64::from_le_bytes(yb.try_into().unwrap()) as i32;
+                if x != p.x.to_raw() || y != p.y.to_raw() {
+                    return false;
+                }
+                *o += 16;
+            }
+            true
+        };
+        if !check_list(&mut o, &region.outline) {
+            matches = false;
+        }
+        if matches {
+            for hole in &region.holes {
+                if !check_list(&mut o, hole) {
+                    matches = false;
+                    break;
+                }
+            }
+        }
+        matches
+    };
+    if geometry_unchanged {
+        b.extend_from_slice(&raw[geo_start..]);
+        return Some(b);
+    }
+
+    let mut push_verts = |b: &mut Vec<u8>, verts: &[crate::coord::CoordPoint]| {
+        b.extend_from_slice(&(verts.len() as u32).to_le_bytes());
+        for p in verts {
+            b.extend_from_slice(&(p.x.to_raw() as f64).to_le_bytes());
+            b.extend_from_slice(&(p.y.to_raw() as f64).to_le_bytes());
+        }
+    };
+    push_verts(&mut b, &region.outline);
+    for hole in &region.holes {
+        push_verts(&mut b, hole);
+    }
+    b.extend_from_slice(&raw[off..]);
+    Some(b)
+}
+
 fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> Result<()> {
+    // Raw path: patched prefix + original params, with the geometry
+    // (outline + holes) rebuilt from the typed fields and any residual
+    // tail bytes preserved.
+    if let Some(raw) = &region.raw_record {
+        if let Some(body) = splice_region_raw(raw, region) {
+            return bw.write_block(|w| {
+                w.write_bytes(&body)?;
+                Ok(())
+            });
+        }
+    }
     bw.write_block(|w| {
         let flags = PrimitiveFlags {
             is_locked: region.is_locked,
@@ -1084,9 +1330,19 @@ fn write_component_body<W: Write + Seek>(
             "ISSHAPEBASED",
             if body.is_shape_based { "TRUE" } else { "FALSE" },
         );
-        params.insert("CAVITYHEIGHT", body.cavity_height.to_string());
-        params.insert("STANDOFFHEIGHT", body.standoff_height.to_string());
-        params.insert("OVERALLHEIGHT", body.overall_height.to_string());
+        // Coord-valued parameters use Altium's mil-string form.
+        params.insert(
+            "CAVITYHEIGHT",
+            super::doc_codec::format_mil_coord(body.cavity_height),
+        );
+        params.insert(
+            "STANDOFFHEIGHT",
+            super::doc_codec::format_mil_coord(body.standoff_height),
+        );
+        params.insert(
+            "OVERALLHEIGHT",
+            super::doc_codec::format_mil_coord(body.overall_height),
+        );
         params.insert("BODYPROJECTION", body.body_projection.to_string());
         params.insert("BODYCOLOR3D", body.body_color_3d.to_string());
         params.insert("BODYOPACITY3D", format!("{:.3}", body.body_opacity_3d));
@@ -1103,8 +1359,14 @@ fn write_component_body<W: Write + Seek>(
             if body.model_embed { "TRUE" } else { "FALSE" },
         );
         params.insert("MODEL.NAME", body.model_name.clone().unwrap_or_default());
-        params.insert("MODEL.2D.X", body.model_2d_location.x.to_string());
-        params.insert("MODEL.2D.Y", body.model_2d_location.y.to_string());
+        params.insert(
+            "MODEL.2D.X",
+            super::doc_codec::format_mil_coord(body.model_2d_location.x),
+        );
+        params.insert(
+            "MODEL.2D.Y",
+            super::doc_codec::format_mil_coord(body.model_2d_location.y),
+        );
         params.insert(
             "MODEL.2D.ROTATION",
             format!("{:.3}", body.model_2d_rotation),
@@ -1112,7 +1374,10 @@ fn write_component_body<W: Write + Seek>(
         params.insert("MODEL.3D.ROTX", format!("{:.3}", body.model_3d_rot_x));
         params.insert("MODEL.3D.ROTY", format!("{:.3}", body.model_3d_rot_y));
         params.insert("MODEL.3D.ROTZ", format!("{:.3}", body.model_3d_rot_z));
-        params.insert("MODEL.3D.DZ", body.model_3d_dz.to_string());
+        params.insert(
+            "MODEL.3D.DZ",
+            super::doc_codec::format_mil_coord(body.model_3d_dz),
+        );
         params.insert("MODEL.MODELTYPE", body.model_type.to_string());
         params.insert(
             "MODEL.MODELSOURCE",
@@ -1417,6 +1682,11 @@ fn write_doc_storages_in_canonical_order(
     emit_or_consume(cf, leftover, "FromTos6", 0, &[])?;
     write_doc_differential_pairs(cf, doc)?;
     emit_or_consume(cf, leftover, "DifferentialPairs6", 0, &[])?;
+    // Rooms are written only when present — Altium rejects an empty
+    // Rooms6 stub.
+    if !doc.rooms.is_empty() {
+        write_doc_rooms(cf, doc)?;
+    }
     emit_or_consume(cf, leftover, "Embeddeds6", 0, &[])?;
     write_doc_arcs(cf, doc)?;
     emit_or_consume(cf, leftover, "Arcs6", 0, &[])?;

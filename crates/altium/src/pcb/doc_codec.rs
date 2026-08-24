@@ -18,7 +18,7 @@ use crate::coord::{Coord, CoordPoint};
 use crate::parameter::ParameterMap;
 
 /// Best-effort coord parser: accepts `"123mil"`, `"4.5mm"`, or a raw integer.
-fn parse_coord_loose(s: &str) -> Option<Coord> {
+pub(crate) fn parse_coord_loose(s: &str) -> Option<Coord> {
     let trimmed = s.trim();
     if trimmed.is_empty() {
         return None;
@@ -47,12 +47,13 @@ fn parse_layer(s: &str) -> i32 {
     super::binary::layer_name_to_byte(s) as i32
 }
 
-fn format_mil_coord(c: Coord) -> String {
+pub(crate) fn format_mil_coord(c: Coord) -> String {
     format!("{:.4}mil", c.to_mils())
 }
 
-/// Inverse of [`super::binary::layer_name_to_byte`] for serialising
-/// `EmbeddedBoard` records (which store the layer name, not byte).
+/// Inverse of [`super::binary::layer_name_to_byte`] for param records that
+/// store layer names — the short dialect Altium emits in these records
+/// ("MID2", "PLANE1"), not the long stream names.
 fn layer_byte_to_name(layer: i32) -> String {
     match layer {
         1 => "TOP".into(),
@@ -67,8 +68,8 @@ fn layer_byte_to_name(layer: i32) -> String {
         56 => "KEEPOUT".into(),
         73 => "DRILLDRAWING".into(),
         74 => "MULTILAYER".into(),
-        n if (2..=31).contains(&n) => format!("MIDLAYER{}", n - 1),
-        n if (39..=54).contains(&n) => format!("INTERNALPLANE{}", n - 38),
+        n if (2..=31).contains(&n) => format!("MID{}", n - 1),
+        n if (39..=54).contains(&n) => format!("PLANE{}", n - 38),
         n if (57..=72).contains(&n) => format!("MECHANICAL{}", n - 56),
         _ => layer.to_string(),
     }
@@ -77,12 +78,20 @@ fn layer_byte_to_name(layer: i32) -> String {
 // Net
 
 pub fn net_from_params(params: &ParameterMap) -> Net {
+    let mut parameters = Vec::new();
+    for (n, v, _) in params.iter() {
+        parameters.push((n.to_string(), v.to_string()));
+    }
     Net {
         name: params.get("NAME").unwrap_or_default().to_string(),
+        parameters,
     }
 }
 
 pub fn net_to_params(net: &Net, params: &mut ParameterMap) {
+    for (k, v) in &net.parameters {
+        params.insert(k, v.clone());
+    }
     params.insert("NAME", net.name.clone());
 }
 
@@ -91,6 +100,8 @@ pub fn net_to_params(net: &Net, params: &mut ParameterMap) {
 pub fn component_from_params(params: &ParameterMap) -> Component {
     let mut consumed: Vec<&str> = Vec::new();
     let mut c = Component::default();
+    // Altium omits ENABLED; absence means enabled.
+    c.enabled = true;
 
     if let Some(v) = params.get("PATTERN") {
         c.name = v.to_string();
@@ -103,7 +114,6 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
     }
     if let Some(v) = get_coord_loose(params, "HEIGHT") {
         c.height = v;
-        consumed.push("HEIGHT");
     }
     if let Some(v) = params.get("COMMENT") {
         c.comment = Some(v.to_string());
@@ -132,7 +142,6 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
     }
     if let Some(v) = params.get_i32("COMMENTAUTOPOSITION") {
         c.comment_auto_position = v;
-        consumed.push("COMMENTAUTOPOSITION");
     }
     if let Some(v) = get_bool_explicit(params, "NAMEON") {
         c.name_on = v;
@@ -140,16 +149,16 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
     }
     if let Some(v) = params.get_i32("NAMEAUTOPOSITION") {
         c.name_auto_position = v;
-        consumed.push("NAMEAUTOPOSITION");
     }
     if let Some(v) = get_bool_explicit(params, "LOCKSTRINGS") {
         c.lock_strings = v;
         consumed.push("LOCKSTRINGS");
     }
 
+    // COMPONENTKIND is read but not consumed: it passes through
+    // `additional_parameters` verbatim (not every record carries it).
     if let Some(v) = params.get_i32("COMPONENTKIND") {
         c.component_kind = v;
-        consumed.push("COMPONENTKIND");
     }
     if let Some(v) = get_bool_explicit(params, "ENABLED") {
         c.enabled = v;
@@ -161,7 +170,6 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
     }
     if let Some(v) = params.get_i32("GROUPNUM") {
         c.group_num = v;
-        consumed.push("GROUPNUM");
     }
     if let Some(v) = get_bool_explicit(params, "ISBGA") {
         c.is_bga = v;
@@ -169,13 +177,17 @@ pub fn component_from_params(params: &ParameterMap) -> Component {
     }
     if let Some(v) = params.get_i32("CHANNELOFFSET") {
         c.channel_offset = v;
-        consumed.push("CHANNELOFFSET");
+    }
+
+    // Same for FOOTPRINTDESCRIPTION: read into the typed field, carried by
+    // passthrough.
+    if let Some(v) = params.get("FOOTPRINTDESCRIPTION") {
+        c.footprint_description = Some(v.to_string());
     }
 
     for (key, target) in [
-        ("FOOTPRINTDESCRIPTION", &mut c.footprint_description),
         ("SOURCEDESIGNATOR", &mut c.source_designator),
-        ("SOURCELIBREFRENCE", &mut c.source_lib_reference),
+        ("SOURCELIBREFERENCE", &mut c.source_lib_reference),
         ("SOURCECOMPONENTLIBRARY", &mut c.source_component_library),
         ("SOURCEDESCRIPTION", &mut c.source_description),
         ("SOURCEFOOTPRINTLIBRARY", &mut c.source_footprint_library),
@@ -208,38 +220,36 @@ pub fn component_to_params(component: &Component, params: &mut ParameterMap) {
     if let Some(d) = &component.description {
         params.insert("DESCRIPTION", d.clone());
     }
+    // Coords as mil strings; always-present toggles written even when
+    // FALSE (a dropped NAMEON=FALSE flips designator labels visible).
     if component.height.to_raw() != 0 {
-        params.insert("HEIGHT", component.height.to_raw().to_string());
+        params.insert("HEIGHT", format_mil_coord(component.height));
     }
     if let Some(c) = &component.comment {
         params.insert("COMMENT", c.clone());
     }
-    if component.x.to_raw() != 0 {
-        params.insert("X", component.x.to_raw().to_string());
-    }
-    if component.y.to_raw() != 0 {
-        params.insert("Y", component.y.to_raw().to_string());
-    }
-    if component.rotation != 0.0 {
-        params.insert("ROTATION", component.rotation.to_string());
-    }
-    if component.layer != 0 {
-        params.insert("LAYER", component.layer.to_string());
-    }
-    if component.comment_on {
-        params.insert("COMMENTON", "TRUE");
-    }
+    params.insert("X", format_mil_coord(component.x));
+    params.insert("Y", format_mil_coord(component.y));
+    params.insert("ROTATION", component.rotation.to_string());
+    params.insert("LAYER", layer_byte_to_name(component.layer));
+    params.insert("COMMENTON", if component.comment_on { "TRUE" } else { "FALSE" });
+    params.insert("NAMEON", if component.name_on { "TRUE" } else { "FALSE" });
+    // Autopositions, GROUPNUM, and CHANNELOFFSET travel via passthrough;
+    // only non-default typed values are (re)written.
     if component.comment_auto_position != 0 {
         params.insert(
             "COMMENTAUTOPOSITION",
             component.comment_auto_position.to_string(),
         );
     }
-    if component.name_on {
-        params.insert("NAMEON", "TRUE");
-    }
     if component.name_auto_position != 0 {
         params.insert("NAMEAUTOPOSITION", component.name_auto_position.to_string());
+    }
+    if component.group_num != 0 {
+        params.insert("GROUPNUM", component.group_num.to_string());
+    }
+    if component.channel_offset != 0 {
+        params.insert("CHANNELOFFSET", component.channel_offset.to_string());
     }
     if component.lock_strings {
         params.insert("LOCKSTRINGS", "TRUE");
@@ -253,16 +263,13 @@ pub fn component_to_params(component: &Component, params: &mut ParameterMap) {
     if component.flipped_on_layer {
         params.insert("FLIPPEDONLAYER", "TRUE");
     }
-    if component.group_num != 0 {
-        params.insert("GROUPNUM", component.group_num.to_string());
-    }
     if component.is_bga {
         params.insert("ISBGA", "TRUE");
     }
     for (key, value) in [
         ("SOURCEDESIGNATOR", component.source_designator.as_deref()),
         (
-            "SOURCELIBREFRENCE",
+            "SOURCELIBREFERENCE",
             component.source_lib_reference.as_deref(),
         ),
         (
@@ -308,8 +315,13 @@ pub fn component_to_params(component: &Component, params: &mut ParameterMap) {
 // Polygon
 
 pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
+    // Only writer-derived keys (layer, net, name, id, vertices) are
+    // consumed; everything else is read into typed fields but also passes
+    // through `additional_parameters` verbatim.
     let mut consumed = Vec::<&str>::new();
     let mut p = Polygon::default();
+    // Altium omits ENABLED; absence means enabled.
+    p.enabled = true;
 
     if let Some(v) = params.get("LAYER") {
         p.layer = parse_layer(v);
@@ -328,32 +340,44 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
         consumed.push("UNIQUEID");
     }
     if let Some(v) = params.get("POLYGONTYPE") {
-        // Older files store this as a string ("Polygon", "PolygonCutout", "BoardOutline").
+        // Stored as a string in real files.
         p.polygon_type = match v.trim() {
             "" => 0,
             "Polygon" => 0,
             "PolygonCutout" | "Cutout" => 1,
             "BoardOutline" => 2,
+            "Split Plane" => 3,
             other => other.parse::<i32>().unwrap_or(0),
         };
-        consumed.push("POLYGONTYPE");
     }
 
-    if let Some(v) = params.get_i32("HATCHSTYLE") {
-        p.poly_hatch_style = v;
+    // HATCHSTYLE is a string in real files ("Solid", "45Degree", …); the
+    // numeric forms come from older third-party writers.
+    if let Some(v) = params.get("HATCHSTYLE") {
+        p.poly_hatch_style = match v.trim() {
+            "None" => 0,
+            "Solid" => 1,
+            "45Degree" => 2,
+            "90Degree" => 3,
+            "Horizontal" => 4,
+            "Vertical" => 5,
+            other => other.parse::<i32>().unwrap_or(0),
+        };
     } else if let Some(v) = params.get_i32("POLYHATCHSTYLE") {
         p.poly_hatch_style = v;
         p.poly_hatch_uses_legacy_key = true;
     }
-    consumed.extend(["HATCHSTYLE", "POLYHATCHSTYLE"]);
 
+    // POURMODE is numeric; the legacy POUROVER key is a bool.
     if let Some(v) = params.get_i32("POURMODE") {
         p.pour_over = v;
     } else if let Some(v) = params.get_i32("POUROVER") {
         p.pour_over = v;
         p.pour_over_uses_legacy_key = true;
+    } else if let Some(v) = get_bool_explicit(params, "POUROVER") {
+        p.pour_over = i32::from(v);
+        p.pour_over_uses_legacy_key = true;
     }
-    consumed.extend(["POURMODE", "POUROVER"]);
 
     if let Some(v) = get_bool_explicit(params, "REMOVEISLANDSBYAREA") {
         p.remove_islands_by_area = v;
@@ -379,16 +403,6 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
         p.avoid_obstacles = v;
         p.avoid_obstacles_uses_legacy_key = true;
     }
-    consumed.extend([
-        "REMOVEISLANDSBYAREA",
-        "ISLANDAREATHRESHOLD",
-        "REMOVEDEAD",
-        "REMOVENECKS",
-        "REMOVENARROWNECKS",
-        "USEOCTAGONS",
-        "AVOIDOBST",
-        "AVOIDOBSTICLES",
-    ]);
 
     for (key, target) in [
         ("GRIDSIZE", &mut p.grid),
@@ -410,7 +424,6 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
         if let Some(v) = get_coord_loose(params, key) {
             *target = v;
         }
-        consumed.push(key);
     }
 
     if let Some(v) = params.get_i32("POURORDER") {
@@ -425,17 +438,10 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
     if let Some(v) = params.get_i64("REPOURAREA") {
         p.area_size = v;
     }
-    consumed.extend([
-        "POURORDER",
-        "RELIEFENTRIES",
-        "POWERPLANECONNECTSTYLE",
-        "REPOURAREA",
-        "FLAGS",
-    ]);
 
-    let lock =
-        get_bool_explicit(params, "PRIMITIVELOCK").or_else(|| get_bool_explicit(params, "LOCKED"));
-    if let Some(v) = lock {
+    // LOCKED and PRIMITIVELOCK are distinct flags in real records — only
+    // PRIMITIVELOCK maps to `primitive_lock`; LOCKED passes through.
+    if let Some(v) = get_bool_explicit(params, "PRIMITIVELOCK") {
         p.primitive_lock = v;
     }
     if let Some(v) = get_bool_explicit(params, "SHELVED") {
@@ -495,29 +501,6 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
     if let Some(v) = get_bool_explicit(params, "ARCPOURMODE") {
         p.arc_pour_mode = v;
     }
-    consumed.extend([
-        "PRIMITIVELOCK",
-        "LOCKED",
-        "SHELVED",
-        "POUROVERSAMENETPOLYGONS",
-        "ENABLED",
-        "KEEPOUT",
-        "POLYGONOUTLINE",
-        "POURED",
-        "AUTOGENERATENAME",
-        "CLIPACUTECORNERS",
-        "DRAWDEADCOPPER",
-        "DRAWREMOVEDISLANDS",
-        "DRAWREMOVEDNECKS",
-        "EXPANDOUTLINE",
-        "IGNOREVIOLATIONS",
-        "MITRECORNERS",
-        "OBEYPOLYGONCUTOUT",
-        "OPTIMALVOIDROTATION",
-        "ALLOWGLOBALEDIT",
-        "MOVEABLE",
-        "ARCPOURMODE",
-    ]);
 
     // Vertex parsing — Altium uses two distinct formats depending on file age:
     //   New: POINTCOUNT + SA<i>.X / SA<i>.Y          (linear only, integer raw)
@@ -527,6 +510,7 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
     // scanning until VX<i>/SA<i>.X stops being present.
     let new_form = params.contains_key("SA0.X") || params.contains_key("POINTCOUNT");
     let old_form = !new_form && (params.contains_key("VX0") || params.contains_key("KIND0"));
+    p.vertices_use_legacy_form = old_form;
 
     let count = if new_form {
         params.get_i32("POINTCOUNT").unwrap_or_else(|| {
@@ -629,14 +613,17 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
 }
 
 pub fn polygon_to_params(p: &Polygon, params: &mut ParameterMap) {
+    // File-loaded polygons carry their settings in `additional_parameters`
+    // (see `polygon_from_params`); only from-scratch polygons need them
+    // derived from typed fields.
+    let from_scratch = p.additional_parameters.is_none();
     if let Some(extra) = &p.additional_parameters {
         for (k, v) in extra {
             params.insert(k, v.clone());
         }
     }
-    params.insert("LAYER", p.layer.to_string());
+    params.insert("LAYER", layer_byte_to_name(p.layer));
     params.insert("NET", p.net.clone().unwrap_or_default());
-    params.insert("POLYGONTYPE", p.polygon_type.to_string());
     if let Some(name) = &p.name {
         if !name.is_empty() {
             params.insert("NAME", name.clone());
@@ -647,154 +634,122 @@ pub fn polygon_to_params(p: &Polygon, params: &mut ParameterMap) {
             params.insert("UNIQUEID", uid.clone());
         }
     }
-    params.insert(
-        if p.poly_hatch_uses_legacy_key {
-            "POLYHATCHSTYLE"
-        } else {
-            "HATCHSTYLE"
-        },
-        p.poly_hatch_style.to_string(),
-    );
-    params.insert(
-        if p.pour_over_uses_legacy_key {
-            "POUROVER"
-        } else {
-            "POURMODE"
-        },
-        p.pour_over.to_string(),
-    );
-    params.insert(
-        "REMOVEISLANDSBYAREA",
-        if p.remove_islands_by_area {
-            "TRUE"
-        } else {
-            "FALSE"
-        },
-    );
-    params.insert("ISLANDAREATHRESHOLD", p.island_area_threshold.to_string());
-    params.insert("REMOVEDEAD", if p.remove_dead { "TRUE" } else { "FALSE" });
-    params.insert(
-        if p.remove_necks_uses_legacy_key {
-            "REMOVENARROWNECKS"
-        } else {
-            "REMOVENECKS"
-        },
-        if p.remove_narrow_necks {
-            "TRUE"
-        } else {
-            "FALSE"
-        },
-    );
-    params.insert("USEOCTAGONS", if p.use_octagons { "TRUE" } else { "FALSE" });
-    params.insert(
-        if p.avoid_obstacles_uses_legacy_key {
-            "AVOIDOBSTICLES"
-        } else {
-            "AVOIDOBST"
-        },
-        if p.avoid_obstacles { "TRUE" } else { "FALSE" },
-    );
 
-    for (key, val) in [
-        ("GRIDSIZE", p.grid),
-        ("TRACKWIDTH", p.track_size),
-        ("MINPRIMLENGTH", p.min_track),
-        ("NECKWIDTH", p.neck_width_threshold),
-        ("ARCAPPROXIMATION", p.arc_approximation),
-        ("BORDERWIDTH", p.border_width),
-        ("SOLDERMASKEXPANSION", p.solder_mask_expansion),
-        ("PASTEMASKEXPANSION", p.paste_mask_expansion),
-        ("RELIEFAIRGAP", p.relief_air_gap),
-        ("RELIEFCONDUCTORWIDTH", p.relief_conductor_width),
-        ("POWERPLANECLEARANCE", p.power_plane_clearance),
-        ("POWERPLANERELIEFEXPANSION", p.power_plane_relief_expansion),
-    ] {
-        if val.to_raw() != 0 {
-            params.insert(key, val.to_raw().to_string());
+    if from_scratch {
+        params.insert(
+            "POLYGONTYPE",
+            match p.polygon_type {
+                1 => "Cutout",
+                2 => "BoardOutline",
+                3 => "Split Plane",
+                _ => "Polygon",
+            },
+        );
+        params.insert(
+            "HATCHSTYLE",
+            match p.poly_hatch_style {
+                0 => "None",
+                2 => "45Degree",
+                3 => "90Degree",
+                4 => "Horizontal",
+                5 => "Vertical",
+                _ => "Solid",
+            },
+        );
+        params.insert("POUROVER", if p.pour_over != 0 { "TRUE" } else { "FALSE" });
+        params.insert(
+            "REMOVEISLANDSBYAREA",
+            if p.remove_islands_by_area {
+                "TRUE"
+            } else {
+                "FALSE"
+            },
+        );
+        params.insert("REMOVEDEAD", if p.remove_dead { "TRUE" } else { "FALSE" });
+        params.insert(
+            "REMOVENECKS",
+            if p.remove_narrow_necks {
+                "TRUE"
+            } else {
+                "FALSE"
+            },
+        );
+        params.insert("USEOCTAGONS", if p.use_octagons { "TRUE" } else { "FALSE" });
+        params.insert(
+            "AVOIDOBST",
+            if p.avoid_obstacles { "TRUE" } else { "FALSE" },
+        );
+        params.insert("LOCKED", "FALSE");
+        params.insert("KEEPOUT", if p.is_keepout { "TRUE" } else { "FALSE" });
+        params.insert(
+            "POLYGONOUTLINE",
+            if p.polygon_outline { "TRUE" } else { "FALSE" },
+        );
+        params.insert(
+            "PRIMITIVELOCK",
+            if p.primitive_lock { "TRUE" } else { "FALSE" },
+        );
+
+        for (key, val) in [
+            ("GRIDSIZE", p.grid),
+            ("TRACKWIDTH", p.track_size),
+            ("MINPRIMLENGTH", p.min_track),
+            ("NECKWIDTH", p.neck_width_threshold),
+            ("ARCAPPROXIMATION", p.arc_approximation),
+            ("BORDERWIDTH", p.border_width),
+            ("SOLDERMASKEXPANSION", p.solder_mask_expansion),
+            ("PASTEMASKEXPANSION", p.paste_mask_expansion),
+            ("RELIEFAIRGAP", p.relief_air_gap),
+            ("RELIEFCONDUCTORWIDTH", p.relief_conductor_width),
+            ("POWERPLANECLEARANCE", p.power_plane_clearance),
+            ("POWERPLANERELIEFEXPANSION", p.power_plane_relief_expansion),
+        ] {
+            if val.to_raw() != 0 {
+                params.insert(key, format_mil_coord(val));
+            }
+        }
+        if p.pour_index != 0 {
+            params.insert("POURORDER", p.pour_index.to_string());
+        }
+        if p.relief_entries != 0 {
+            params.insert("RELIEFENTRIES", p.relief_entries.to_string());
+        }
+        if p.power_plane_connect_style != 0 {
+            params.insert(
+                "POWERPLANECONNECTSTYLE",
+                p.power_plane_connect_style.to_string(),
+            );
+        }
+        if p.area_size != 0 {
+            params.insert("REPOURAREA", p.area_size.to_string());
+        }
+        if p.is_hidden {
+            params.insert("SHELVED", "TRUE");
+        }
+        if !p.enabled {
+            params.insert("ENABLED", "FALSE");
         }
     }
 
-    if p.pour_index != 0 {
-        params.insert("POURORDER", p.pour_index.to_string());
-    }
-    if p.relief_entries != 0 {
-        params.insert("RELIEFENTRIES", p.relief_entries.to_string());
-    }
-    if p.power_plane_connect_style != 0 {
-        params.insert(
-            "POWERPLANECONNECTSTYLE",
-            p.power_plane_connect_style.to_string(),
-        );
-    }
-    if p.area_size != 0 {
-        params.insert("REPOURAREA", p.area_size.to_string());
-    }
-
-    if p.primitive_lock {
-        params.insert("PRIMITIVELOCK", "TRUE");
-    }
-    if p.is_hidden {
-        params.insert("SHELVED", "TRUE");
-    }
-    if p.pour_over_same_net_polygons {
-        params.insert("POUROVERSAMENETPOLYGONS", "TRUE");
-    }
-    if !p.enabled {
-        params.insert("ENABLED", "FALSE");
-    }
-    if p.is_keepout {
-        params.insert("KEEPOUT", "TRUE");
-    }
-    if p.polygon_outline {
-        params.insert("POLYGONOUTLINE", "TRUE");
-    }
-    if p.poured {
-        params.insert("POURED", "TRUE");
-    }
-    if p.auto_generate_name {
-        params.insert("AUTOGENERATENAME", "TRUE");
-    }
-    if p.clip_acute_corners {
-        params.insert("CLIPACUTECORNERS", "TRUE");
-    }
-    if p.draw_dead_copper {
-        params.insert("DRAWDEADCOPPER", "TRUE");
-    }
-    if p.draw_removed_islands {
-        params.insert("DRAWREMOVEDISLANDS", "TRUE");
-    }
-    if p.draw_removed_necks {
-        params.insert("DRAWREMOVEDNECKS", "TRUE");
-    }
-    if p.expand_outline {
-        params.insert("EXPANDOUTLINE", "TRUE");
-    }
-    if p.ignore_violations {
-        params.insert("IGNOREVIOLATIONS", "TRUE");
-    }
-    if p.mitre_corners {
-        params.insert("MITRECORNERS", "TRUE");
-    }
-    if p.obey_polygon_cutout {
-        params.insert("OBEYPOLYGONCUTOUT", "TRUE");
-    }
-    if p.optimal_void_rotation {
-        params.insert("OPTIMALVOIDROTATION", "TRUE");
-    }
-    if p.allow_global_edit {
-        params.insert("ALLOWGLOBALEDIT", "TRUE");
-    }
-    if p.moveable {
-        params.insert("MOVEABLE", "TRUE");
-    }
-    if p.arc_pour_mode {
-        params.insert("ARCPOURMODE", "TRUE");
-    }
-
-    params.insert("POINTCOUNT", p.vertices.len().to_string());
-    for (i, v) in p.vertices.iter().enumerate() {
-        params.insert(format!("SA{i}.X").as_str(), v.point.x.to_raw().to_string());
-        params.insert(format!("SA{i}.Y").as_str(), v.point.y.to_raw().to_string());
+    // Vertices go back out in the form they came in: the legacy arc-aware
+    // KIND/VX/VY/CX/CY/SA/EA/R keys, or the newer POINTCOUNT + SA<i>.X/Y.
+    if p.vertices_use_legacy_form {
+        for (i, v) in p.vertices.iter().enumerate() {
+            params.insert(format!("KIND{i}").as_str(), v.kind.to_string());
+            params.insert(format!("VX{i}").as_str(), format_mil_coord(v.point.x));
+            params.insert(format!("VY{i}").as_str(), format_mil_coord(v.point.y));
+            params.insert(format!("CX{i}").as_str(), format_mil_coord(v.arc_center.x));
+            params.insert(format!("CY{i}").as_str(), format_mil_coord(v.arc_center.y));
+            params.insert(format!("SA{i}").as_str(), v.start_angle.to_string());
+            params.insert(format!("EA{i}").as_str(), v.end_angle.to_string());
+            params.insert(format!("R{i}").as_str(), format_mil_coord(v.radius));
+        }
+    } else {
+        params.insert("POINTCOUNT", p.vertices.len().to_string());
+        for (i, v) in p.vertices.iter().enumerate() {
+            params.insert(format!("SA{i}.X").as_str(), v.point.x.to_raw().to_string());
+            params.insert(format!("SA{i}.Y").as_str(), v.point.y.to_raw().to_string());
+        }
     }
 }
 
@@ -971,9 +926,8 @@ pub fn differential_pair_from_params(params: &ParameterMap) -> DifferentialPair 
     if let Some(v) = params.get("UNIQUEID") {
         d.unique_id = v.to_string();
     }
-    if let Some(v) = get_bool_explicit(params, "ENABLED") {
-        d.enabled = v;
-    }
+    // Altium omits ENABLED; absence means enabled.
+    d.enabled = get_bool_explicit(params, "ENABLED").unwrap_or(true);
     d.parameters = typed;
     d
 }
@@ -994,7 +948,10 @@ pub fn differential_pair_to_params(d: &DifferentialPair, params: &mut ParameterM
     if !d.unique_id.is_empty() {
         params.insert("UNIQUEID", d.unique_id.clone());
     }
-    params.insert("ENABLED", if d.enabled { "TRUE" } else { "FALSE" });
+    // Only an explicit FALSE is written; Altium doesn't emit ENABLED.
+    if !d.enabled {
+        params.insert("ENABLED", "FALSE");
+    }
 }
 
 // Room
@@ -1085,6 +1042,12 @@ pub fn embedded_board_from_params(params: &ParameterMap) -> EmbeddedBoard {
     if let Some(v) = params.get_i32("FONTCOLOR") {
         b.title_font_color = v;
     }
+    if let Some(v) = get_coord_loose(params, "X") {
+        b.x_location = v;
+    }
+    if let Some(v) = get_coord_loose(params, "Y") {
+        b.y_location = v;
+    }
     if let Some(v) = get_coord_loose(params, "X1") {
         b.x1_location = v;
     }
@@ -1103,12 +1066,49 @@ pub fn embedded_board_from_params(params: &ParameterMap) -> EmbeddedBoard {
     if let Some(v) = get_coord_loose(params, "ROWSPACING") {
         b.row_spacing = v;
     }
+    // Unmodeled keys (VIEWPORTX1..Y2, VISIBLELAYERS, …) pass through.
+    b.additional_parameters = collect_additional(
+        params,
+        &[
+            "DOCUMENTPATH",
+            "VIEWPORTTITLE",
+            "FONTNAME",
+            "LAYER",
+            "ROTATION",
+            "VIEWPORTSCALE",
+            "MIRROR",
+            "KEEPOUT",
+            "POLYGONOUTLINE",
+            "USERROUTED",
+            "ISVIEWPORT",
+            "VIEWPORTVISIBLE",
+            "ORIGINMODE",
+            "COLCOUNT",
+            "ROWCOUNT",
+            "UNIONINDEX",
+            "FONTSIZE",
+            "FONTCOLOR",
+            "X",
+            "Y",
+            "X1",
+            "Y1",
+            "X2",
+            "Y2",
+            "COLSPACING",
+            "ROWSPACING",
+        ],
+    );
     b
 }
 
 pub fn embedded_board_to_params(b: &EmbeddedBoard, params: &mut ParameterMap) {
+    // Defaults first, then raw passthrough, then typed fields — later
+    // inserts win.
     params.insert("SELECTION", "FALSE");
     params.insert("LOCKED", "FALSE");
+    for (k, v) in &b.additional_parameters {
+        params.insert(k, v.clone());
+    }
     params.insert(
         "POLYGONOUTLINE",
         if b.polygon_outline { "TRUE" } else { "FALSE" },
@@ -1118,17 +1118,15 @@ pub fn embedded_board_to_params(b: &EmbeddedBoard, params: &mut ParameterMap) {
     params.insert("MIRROR", if b.mirror_flag { "TRUE" } else { "FALSE" });
     params.insert("LAYER", layer_byte_to_name(b.layer));
     params.insert("UNIONINDEX", b.union_index.to_string());
-    if b.origin_mode != 0 {
-        params.insert("ORIGINMODE", b.origin_mode.to_string());
-    }
+    params.insert("ORIGINMODE", b.origin_mode.to_string());
     params.insert("COLCOUNT", b.col_count.to_string());
     params.insert("ROWCOUNT", b.row_count.to_string());
     params.insert("X1", format_mil_coord(b.x1_location));
     params.insert("Y1", format_mil_coord(b.y1_location));
     params.insert("X2", format_mil_coord(b.x2_location));
     params.insert("Y2", format_mil_coord(b.y2_location));
-    params.insert("X", format_mil_coord(b.x1_location));
-    params.insert("Y", format_mil_coord(b.y1_location));
+    params.insert("X", format_mil_coord(b.x_location));
+    params.insert("Y", format_mil_coord(b.y_location));
     params.insert("COLSPACING", format_mil_coord(b.col_spacing));
     params.insert("ROWSPACING", format_mil_coord(b.row_spacing));
     params.insert("ROTATION", format!(" {:E}", b.rotation));

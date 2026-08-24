@@ -19,7 +19,8 @@ pub struct Track {
     pub layer: i32,
     pub net: Option<String>,
     pub net_index: u16,
-    pub component_index: u8,
+    /// Index into the document's `components` list, `-1` for free primitives.
+    pub component_index: i32,
     pub unique_id: Option<String>,
     pub user_routed: bool,
     pub union_index: i32,
@@ -54,6 +55,12 @@ pub struct Track {
     pub is_hidden: bool,
     pub allow_global_edit: bool,
     pub moveable: bool,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
 }
 
 impl Default for Track {
@@ -67,7 +74,7 @@ impl Default for Track {
             layer: 0,
             net: None,
             net_index: 0,
-            component_index: 0,
+            component_index: -1,
             unique_id: None,
             user_routed: false,
             union_index: 0,
@@ -97,6 +104,7 @@ impl Default for Track {
             is_hidden: false,
             allow_global_edit: false,
             moveable: false,
+            raw_record: None,
         }
     }
 }
@@ -125,7 +133,8 @@ pub struct Arc {
     pub layer: i32,
     pub net: Option<String>,
     pub net_index: u16,
-    pub component_index: u8,
+    /// Index into the document's `components` list, `-1` for free primitives.
+    pub component_index: i32,
     pub unique_id: Option<String>,
     pub user_routed: bool,
     pub union_index: i32,
@@ -160,6 +169,12 @@ pub struct Arc {
     pub is_hidden: bool,
     pub allow_global_edit: bool,
     pub moveable: bool,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
 }
 
 impl Default for Arc {
@@ -173,7 +188,7 @@ impl Default for Arc {
             layer: 0,
             net: None,
             net_index: 0,
-            component_index: 0,
+            component_index: -1,
             unique_id: None,
             user_routed: false,
             union_index: 0,
@@ -203,6 +218,7 @@ impl Default for Arc {
             is_hidden: false,
             allow_global_edit: false,
             moveable: false,
+            raw_record: None,
         }
     }
 }
@@ -365,6 +381,15 @@ pub struct Pad {
     pub reserved_block_after_net_string: Vec<u8>,
     /// The pad's net-string block, typically `"|&|0"` in real Altium files.
     pub net_string_block: String,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
+    /// Original size/shape block bytes (see `raw_record`).
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_size_shape: Option<Vec<u8>>,
 }
 
 impl Default for Pad {
@@ -478,6 +503,8 @@ impl Default for Pad {
             reserved_block_after_designator: vec![0u8],
             reserved_block_after_net_string: vec![0u8],
             net_string_block: "|&|0".to_string(),
+            raw_record: None,
+            raw_size_shape: None,
         }
     }
 }
@@ -562,6 +589,12 @@ pub struct Via {
     pub trailing_reserved_i16: i16,
     /// `i32` reserved field at the end of the via record (default `259`).
     pub trailing_reserved_i32: i32,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
 }
 
 impl Default for Via {
@@ -621,6 +654,7 @@ impl Default for Via {
             reserved_byte_after_mask_flag: 1,
             trailing_reserved_i16: 15,
             trailing_reserved_i32: 259,
+            raw_record: None,
         }
     }
 }
@@ -641,6 +675,8 @@ pub struct Fill {
     pub rotation: f64,
     pub net: Option<String>,
     pub net_index: u16,
+    /// Index into the document's `components` list, `-1` for free fills.
+    pub component_index: i32,
     pub unique_id: Option<String>,
     pub is_locked: bool,
     pub user_routed: bool,
@@ -671,6 +707,12 @@ pub struct Fill {
     pub allow_global_edit: bool,
     pub moveable: bool,
     pub is_redundant: bool,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
 }
 
 impl Default for Fill {
@@ -682,6 +724,7 @@ impl Default for Fill {
             rotation: 0.0,
             net: None,
             net_index: 0,
+            component_index: -1,
             unique_id: None,
             is_locked: false,
             user_routed: false,
@@ -712,6 +755,7 @@ impl Default for Fill {
             allow_global_edit: false,
             moveable: false,
             is_redundant: false,
+            raw_record: None,
         }
     }
 }
@@ -735,6 +779,9 @@ impl Fill {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Region {
     pub outline: Vec<CoordPoint>,
+    /// Hole outlines (cutouts) following the main outline on disk.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub holes: Vec<Vec<CoordPoint>>,
     pub layer: i32,
     pub kind: i32,
     /// Index into the document's `Nets6` table; `0` means "no net".
@@ -791,12 +838,19 @@ pub struct Region {
     pub arc_approximation: Coord,
     /// Parameters in the C-string block we don't model as fields.
     pub additional_parameters: Option<BTreeMap<String, String>>,
+
+    /// Original on-disk record body, preserved so unmodeled bytes (union
+    /// membership, teardrop flags, format tails) survive write-back. The
+    /// writer patches the typed fields above into this buffer when present.
+    #[cfg_attr(feature = "serde", serde(skip))]
+    pub raw_record: Option<Vec<u8>>,
 }
 
 impl Default for Region {
     fn default() -> Self {
         Self {
             outline: Vec::new(),
+            holes: Vec::new(),
             layer: 0,
             kind: 0,
             net_index: 0,
@@ -843,6 +897,7 @@ impl Default for Region {
             area: 0,
             arc_approximation: Coord::ZERO,
             additional_parameters: None,
+            raw_record: None,
         }
     }
 }
@@ -1295,4 +1350,8 @@ impl ComponentBody {
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Net {
     pub name: String,
+    /// Raw `Nets6` record parameters (color, visibility, per-layer routing
+    /// widths, …), preserved verbatim for write-back.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub parameters: Vec<(String, String)>,
 }

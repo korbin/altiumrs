@@ -92,6 +92,11 @@ pub struct Polygon {
     /// Set when the source file used the legacy `REMOVENARROWNECKS` spelling
     /// instead of `REMOVENECKS`.
     pub remove_necks_uses_legacy_key: bool,
+    /// Set when the source file stored vertices in the legacy arc-aware
+    /// `KIND<i>`/`VX<i>`/… form rather than `POINTCOUNT` + `SA<i>.X/Y`.
+    /// The writer mirrors the source form.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub vertices_use_legacy_form: bool,
     pub arc_pour_mode: bool,
     pub auto_generate_name: bool,
     pub clip_acute_corners: bool,

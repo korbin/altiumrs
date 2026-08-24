@@ -68,6 +68,42 @@ impl Document {
         LayerStack::from_board_parameters(params)
     }
 
+    /// The document's display unit (`DISPLAYUNIT` in `Board6`): `Some(0)`
+    /// = metric, `Some(1)` = imperial, `None` when absent. Display-only —
+    /// stored coordinates are unit-agnostic raw values, and every
+    /// coordinate parameter this library writes carries an explicit `mil`
+    /// suffix, so files are correct in either mode. Preserved verbatim on
+    /// write via `board_parameters`.
+    pub fn display_unit(&self) -> Option<i32> {
+        self.board_parameters.as_ref()?.iter().find_map(|(k, v)| {
+            k.eq_ignore_ascii_case("DISPLAYUNIT")
+                .then(|| v.trim().parse().ok())
+                .flatten()
+        })
+    }
+
+    /// The board origin (`Design » Origin` in Altium; `ORIGINX`/`ORIGINY`
+    /// in `Board6`), in absolute workspace coordinates. `(0, 0)` when unset
+    /// or unparsable. Every coordinate Altium *displays* is relative to
+    /// this point; everything stored in the file is absolute.
+    pub fn board_origin(&self) -> crate::coord::CoordPoint {
+        let mut origin = crate::coord::CoordPoint::default();
+        if let Some(params) = &self.board_parameters {
+            for (k, v) in params {
+                if k.eq_ignore_ascii_case("ORIGINX") {
+                    if let Ok(c) = crate::coord::Coord::parse_altium(v) {
+                        origin.x = c;
+                    }
+                } else if k.eq_ignore_ascii_case("ORIGINY") {
+                    if let Ok(c) = crate::coord::Coord::parse_altium(v) {
+                        origin.y = c;
+                    }
+                }
+            }
+        }
+        origin
+    }
+
     /// Bounding box of every primitive directly referenced by the document.
     pub fn bounds(&self) -> CoordRect {
         let mut acc = CoordRect::EMPTY;

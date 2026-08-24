@@ -136,6 +136,69 @@ pub(crate) fn write_common_prefix_full<W: Write + Seek>(
     Ok(())
 }
 
+/// In-place patches for raw record buffers (see `raw_record` on the
+/// primitive structs): the writer patches typed fields into the original
+/// bytes so unmodeled content survives verbatim.
+pub(crate) fn patch_u8(buf: &mut [u8], off: usize, v: u8) {
+    if off < buf.len() {
+        buf[off] = v;
+    }
+}
+
+pub(crate) fn patch_u16(buf: &mut [u8], off: usize, v: u16) {
+    if off + 2 <= buf.len() {
+        buf[off..off + 2].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+pub(crate) fn patch_i32(buf: &mut [u8], off: usize, v: i32) {
+    if off + 4 <= buf.len() {
+        buf[off..off + 4].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+pub(crate) fn patch_f64(buf: &mut [u8], off: usize, v: f64) {
+    if off + 8 <= buf.len() {
+        buf[off..off + 8].copy_from_slice(&v.to_le_bytes());
+    }
+}
+
+pub(crate) fn patch_point(buf: &mut [u8], off: usize, p: CoordPoint) {
+    patch_i32(buf, off, p.x.to_raw());
+    patch_i32(buf, off + 4, p.y.to_raw());
+}
+
+/// Patch layer/flags/net/component into a raw common prefix. Only the four
+/// modeled flag bits are replaced; all other flag bits keep their original
+/// values (they carry unmodeled state such as teardrop markers).
+pub(crate) fn patch_common_prefix(
+    buf: &mut [u8],
+    layer: u8,
+    flags: PrimitiveFlags,
+    net_index: i32,
+    component_index: i32,
+) {
+    if buf.len() < 13 {
+        return;
+    }
+    const MODELED: u16 = FLAG_UNLOCKED | FLAG_TENTING_TOP | FLAG_TENTING_BOTTOM | FLAG_KEEPOUT;
+    buf[0] = layer;
+    let orig = u16::from_le_bytes([buf[1], buf[2]]);
+    patch_u16(buf, 1, (orig & !MODELED) | flags.encode());
+    let net_word: u16 = if (1..=0xFFFF).contains(&net_index) {
+        (net_index - 1) as u16
+    } else {
+        0xFFFF
+    };
+    patch_u16(buf, 3, net_word);
+    let comp_word: u16 = if (0..=0xFFFE).contains(&component_index) {
+        component_index as u16
+    } else {
+        0xFFFF
+    };
+    patch_u16(buf, 7, comp_word);
+}
+
 pub(crate) fn read_coord_point<R: Read + Seek>(reader: &mut BinaryReader<R>) -> Result<CoordPoint> {
     let x = reader.read_i32()?;
     let y = reader.read_i32()?;
@@ -185,6 +248,13 @@ pub fn layer_name_to_byte(layer_name: &str) -> u8 {
         }
     }
     if let Some(rest) = normalised.strip_prefix("INTERNALPLANE") {
+        if let Ok(n) = rest.parse::<u32>() {
+            if (1..=16).contains(&n) {
+                return 38 + n as u8;
+            }
+        }
+    } else if let Some(rest) = normalised.strip_prefix("PLANE") {
+        // Short dialect used in param records (e.g. Polygons6 `LAYER=PLANE1`).
         if let Ok(n) = rest.parse::<u32>() {
             if (1..=16).contains(&n) {
                 return 38 + n as u8;

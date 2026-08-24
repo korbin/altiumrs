@@ -605,10 +605,15 @@ async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
     let mut board = EmbeddedBoard::default();
     board.document_path = Some("Sub.PcbDoc".into());
     board.layer = 1;
-    board.x1_location = Coord::from_mils(100.0);
-    board.y1_location = Coord::from_mils(50.0);
-    board.x2_location = Coord::from_mils(140.0);
-    board.y2_location = Coord::from_mils(90.0);
+    // Placement translation: where the sub-doc's board origin (0,0 here)
+    // lands. X1..Y2 is only the cached bounding box and must not shift
+    // the placement.
+    board.x_location = Coord::from_mils(100.0);
+    board.y_location = Coord::from_mils(50.0);
+    board.x1_location = Coord::from_mils(80.0);
+    board.y1_location = Coord::from_mils(30.0);
+    board.x2_location = Coord::from_mils(120.0);
+    board.y2_location = Coord::from_mils(70.0);
     board.col_count = 2;
     board.row_count = 3;
     board.col_spacing = Coord::from_mils(200.0);
@@ -618,7 +623,7 @@ async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
     let flat = parent.flatten_embedded_boards_with(&loader);
     assert_eq!(flat.pads.len(), 6, "2×3 array of one-pad sub-doc");
 
-    // Each pad should be at (X1 + col*col_spacing, Y1 + row*row_spacing).
+    // Each pad should be at (X + col*col_spacing, Y + row*row_spacing).
     let mut got: Vec<(i32, i32)> = flat
         .pads
         .iter()
@@ -636,6 +641,94 @@ async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
     }
     expected.sort();
     assert_eq!(got, expected);
+}
+
+#[tokio::test]
+async fn flatten_subtracts_child_origin_and_remaps_indices() {
+    use altium::pcb::EmbeddedBoard;
+    use altium::{Coord, CoordPoint};
+
+    // Sub-doc: board origin at (100, 200) mil, one component whose pad is
+    // linked to it (component_index 0) and netted to "GND" (index 2 of
+    // [VCC, GND], 1-based).
+    let mut sub = pcb::Document::default();
+    sub.board_parameters = Some(vec![
+        ("ORIGINX".to_string(), "100mil".to_string()),
+        ("ORIGINY".to_string(), "200mil".to_string()),
+    ]);
+    sub.nets.push(pcb::Net { name: "VCC".into(), ..Default::default() });
+    sub.nets.push(pcb::Net { name: "GND".into(), ..Default::default() });
+    let mut sub_comp = pcb::Component::new("SUB-COMP");
+    sub_comp.x = Coord::from_mils(150.0);
+    sub_comp.y = Coord::from_mils(260.0);
+    sub.components.push(sub_comp);
+    let mut pad = pcb::Pad::default();
+    pad.location = CoordPoint::new(Coord::from_mils(150.0), Coord::from_mils(260.0));
+    pad.size_top = CoordPoint::new(Coord::from_mils(40.0), Coord::from_mils(40.0));
+    pad.size_middle = pad.size_top;
+    pad.size_bottom = pad.size_top;
+    pad.layer = 1;
+    pad.component_index = 0;
+    // The writer resolves net linkage from the name; the reader hands back
+    // the numeric index (2 = 1-based position of "GND" in [VCC, GND]).
+    pad.net = Some("GND".into());
+    pad.net_index = 2;
+    sub.pads.push(pad);
+    let sub_bytes = sub.to_bytes().expect("write sub");
+
+    struct Mem(Vec<u8>);
+    impl pcb::BoardLoader for Mem {
+        fn load(&self, _: &str) -> altium::Result<Option<Vec<u8>>> {
+            Ok(Some(self.0.clone()))
+        }
+    }
+    let loader = Mem(sub_bytes);
+
+    // Parent: its own component + pad on "GND", and the sub-board placed
+    // so its board origin lands at (1000, 2000) mil.
+    let mut parent = pcb::Document::default();
+    parent.nets.push(pcb::Net { name: "GND".into(), ..Default::default() });
+    parent.components.push(pcb::Component::new("PARENT-COMP"));
+    let mut ppad = pcb::Pad::default();
+    ppad.size_top = CoordPoint::new(Coord::from_mils(40.0), Coord::from_mils(40.0));
+    ppad.layer = 1;
+    ppad.component_index = 0;
+    ppad.net = Some("GND".into());
+    ppad.net_index = 1;
+    parent.pads.push(ppad);
+    let mut board = EmbeddedBoard::default();
+    board.document_path = Some("Sub.PcbDoc".into());
+    board.layer = 1;
+    board.x_location = Coord::from_mils(1000.0);
+    board.y_location = Coord::from_mils(2000.0);
+    parent.embedded_boards.push(board);
+
+    let flat = parent.flatten_embedded_boards_with(&loader);
+    assert_eq!(flat.components.len(), 2);
+    assert_eq!(flat.pads.len(), 2);
+
+    // Sub pad: (150,260) − child origin (100,200) + placement (1000,2000).
+    let sub_pad = &flat.pads[1];
+    assert_eq!(
+        sub_pad.location,
+        CoordPoint::new(Coord::from_mils(1050.0), Coord::from_mils(2060.0)),
+        "child board origin must be subtracted before the placement offset"
+    );
+    // Its owner is the *second* merged component, not the parent's.
+    assert_eq!(sub_pad.component_index, 1);
+    // Nets merged by name: [GND, VCC]; the sub's GND (was 2) is now 1.
+    assert_eq!(sub_pad.net_index, 1);
+    assert_eq!(flat.nets.len(), 2);
+    // Parent's pad is untouched.
+    assert_eq!(flat.pads[0].component_index, 0);
+    assert_eq!(flat.pads[0].net_index, 1);
+    // The sub component's anchor moved with the same transform.
+    assert_eq!(flat.components[1].x, Coord::from_mils(1050.0));
+    assert_eq!(flat.components[1].y, Coord::from_mils(2060.0));
+    // Its owned pad clone stayed in step with the document-level pad.
+    assert_eq!(flat.components[1].pads.len(), 1);
+    assert_eq!(flat.components[1].pads[0].location, sub_pad.location);
+    assert_eq!(flat.components[1].pads[0].component_index, 1);
 }
 
 #[tokio::test]

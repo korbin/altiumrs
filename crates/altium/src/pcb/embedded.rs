@@ -65,10 +65,21 @@ pub struct EmbeddedBoard {
     pub moveable: bool,
     pub paste_mask_expansion: Coord,
     pub is_hidden: bool,
+    /// Placement translation (`X`/`Y`): where the sub-board's own board
+    /// origin lands, in the parent's absolute frame. Altium's UI shows it
+    /// relative to the parent's board origin.
+    pub x_location: Coord,
+    pub y_location: Coord,
+    /// Cached world-space bounding box of the placed instance (`X1`..`Y2`),
+    /// not the placement anchor.
     pub x1_location: Coord,
     pub y1_location: Coord,
     pub x2_location: Coord,
     pub y2_location: Coord,
+    /// Raw record parameters not modeled above (`VIEWPORTX1..Y2`,
+    /// `VISIBLELAYERS`, …), preserved verbatim for write-back.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub additional_parameters: std::collections::BTreeMap<String, String>,
 }
 
 // ─── Sub-document resolution ────────────────────────────────────────────────
@@ -280,9 +291,15 @@ mod tests {
         let canonical = dir.join("MixedCase.PcbDoc");
         std::fs::write(&canonical, b"placeholder").unwrap();
 
-        // Lookup using a different casing should still find the file.
-        let resolved = resolve_in_dir(&dir, "MIXEDCASE.PCBDOC");
-        assert_eq!(resolved.as_ref(), Some(&canonical));
+        // Lookup using a different casing should still find the file. On a
+        // case-insensitive filesystem (macOS default) the literal join may
+        // already hit, returning the queried casing — compare resolved
+        // identity, not the string.
+        let resolved = resolve_in_dir(&dir, "MIXEDCASE.PCBDOC").expect("file should be found");
+        assert_eq!(
+            std::fs::canonicalize(&resolved).unwrap(),
+            std::fs::canonicalize(&canonical).unwrap()
+        );
 
         let _ = std::fs::remove_file(&canonical);
         let _ = std::fs::remove_dir(&dir);

@@ -7,7 +7,7 @@ use super::layer_colors;
 use super::svg::SvgContext;
 use super::transform::CoordTransform;
 use crate::color::Color;
-use crate::coord::{Coord, CoordPoint, CoordRect};
+use crate::coord::{CoordPoint, CoordRect};
 use crate::enums::PadShape;
 use crate::pcb::embedded::{BoardLoader, EmbeddedBoard};
 use crate::pcb::primitives::{Arc, ComponentBody, Fill, Pad, Region, Text, Track, Via};
@@ -568,43 +568,43 @@ fn draw_embedded_board<C: RenderContext>(
     let cols = board.col_count.max(1);
     let rows = board.row_count.max(1);
 
-    // Cache a couple of screen-space helpers used per instance.
-    let zero_screen = t.world_to_screen(CoordPoint::new(Coord::ZERO, Coord::ZERO));
-
     for col in 0..cols {
         for row in 0..rows {
-            let inst_origin = CoordPoint::new(
-                board.x1_location + board.col_spacing * col,
-                board.y1_location + board.row_spacing * row,
+            // Placement semantics (same as `pcb::flatten`): the record's
+            // `X`/`Y` is where the sub-board's own board origin lands, with
+            // rotation/mirror applied about that anchor. `X1..Y2` is only
+            // the cached bounding box.
+            let inst_translation = CoordPoint::new(
+                board.x_location + board.col_spacing * col,
+                board.y_location + board.row_spacing * row,
             );
-            let inst_origin_screen = t.world_to_screen(inst_origin);
+            let inst_translation_screen = t.world_to_screen(inst_translation);
 
             match &sub_doc {
                 Some(sub) => {
-                    // Build the screen-space transform that places the sub-doc's
-                    // (0,0) at `inst_origin` in the parent's world space, with
-                    // the embedded board's rotation/mirror applied around that
-                    // anchor. See the math derivation: the sequence below is
-                    // equivalent to "render every sub-doc world point p as
-                    // parent_screen(rot(p) + origin_world)".
+                    // Screen-space composition of
+                    //   p_parent = R·M·(p_child − child_origin) + translation:
+                    // translate to the instance point, rotate/mirror, then
+                    // shift the child's board origin onto that anchor.
+                    let child_origin_screen = t.world_to_screen(sub.board_origin());
                     ctx.save_state();
-                    ctx.translate(inst_origin_screen.0, inst_origin_screen.1);
+                    ctx.translate(inst_translation_screen.0, inst_translation_screen.1);
                     if board.rotation != 0.0 {
                         ctx.rotate(board.rotation);
                     }
                     if board.mirror_flag {
                         ctx.scale(-1.0, 1.0);
                     }
-                    ctx.translate(-zero_screen.0, -zero_screen.1);
+                    ctx.translate(-child_origin_screen.0, -child_origin_screen.1);
 
                     render_document_inner(ctx, sub, t, loader, depth + 1);
                     ctx.restore_state();
                 }
                 None => {
-                    // Placeholder — uses the parent-relative bounding box from
-                    // X1/Y1/X2/Y2, shifted by the per-instance offset.
-                    let dx = inst_origin.x - board.x1_location;
-                    let dy = inst_origin.y - board.y1_location;
+                    // Placeholder — the cached bounding box from X1/Y1/X2/Y2,
+                    // shifted by the per-instance array offset.
+                    let dx = board.col_spacing * col;
+                    let dy = board.row_spacing * row;
                     let p1 = CoordPoint::new(board.x1_location + dx, board.y1_location + dy);
                     let p2 = CoordPoint::new(board.x2_location + dx, board.y2_location + dy);
                     draw_embedded_placeholder(ctx, t, board, p1, p2);

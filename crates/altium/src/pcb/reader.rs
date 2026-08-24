@@ -488,13 +488,16 @@ fn read_param_map<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<ParameterM
 // Primitives
 
 fn read_arc<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Arc>> {
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let body = br.read_block()?;
+    if body.is_empty() {
         return Ok(None);
     }
-    let start = br.position()?;
+    let size = body.len() as u32;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
-    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
     let center = read_coord_point(br)?;
     let radius = Coord::from_raw(br.read_i32()?);
     let start_angle = br.read_f64()?;
@@ -515,6 +518,7 @@ fn read_arc<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Arc>> {
         end_angle,
         width,
         layer: i32::from(layer),
+        component_index: ci,
         ..Arc::default()
     };
     arc.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
@@ -522,6 +526,7 @@ fn read_arc<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Arc>> {
     arc.is_tenting_top = pf.is_tenting_top;
     arc.is_tenting_bottom = pf.is_tenting_bottom;
     arc.is_keepout = pf.is_keepout;
+    arc.raw_record = Some(body);
     Ok(Some(arc))
 }
 
@@ -531,12 +536,16 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     let net_string_block = br.read_pascal_string_block()?;
     let reserved_block_after_net_string = br.read_block()?;
 
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let main_body = br.read_block()?;
+    if main_body.is_empty() {
         return Ok(None);
     }
+    let size = main_body.len() as u32;
+    let mut main_cur = BinaryReader::new(std::io::Cursor::new(main_body.as_slice()))?;
+    let outer_br = br;
+    let br = &mut main_cur;
 
-    let start = br.position()?;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
     let (layer, flags_bits, net_idx, component_index) =
         (cp.layer, cp.flags, cp.net_index, cp.component_index);
@@ -595,9 +604,12 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
         br.skip(r)?;
     }
 
-    // 596-byte size/shape block.
-    let (_flags_byte_ss, ss_size) = br.read_block_header()?;
-    let ss_size = u64::from(ss_size);
+    // 596-byte size/shape block — read from the outer stream; the main
+    // block cursor is exhausted.
+    let ss_body = outer_br.read_block()?;
+    let ss_size = ss_body.len() as u64;
+    let mut ss_cur = BinaryReader::new(std::io::Cursor::new(ss_body.as_slice()))?;
+    let br = &mut ss_cur;
     let has_size_shape_block = ss_size > 0;
 
     let mut layer_x_sizes = [0i32; 29];
@@ -768,15 +780,24 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     // typically carried in an associated Region6 record.
     pad.has_custom_shapes = matches!(pad.shape_top, PadShape::Unknown(_) | PadShape::CustomShape);
 
+    pad.raw_record = Some(main_body);
+    pad.raw_size_shape = if ss_body.is_empty() {
+        None
+    } else {
+        Some(ss_body)
+    };
     Ok(Some(pad))
 }
 
 fn read_via<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Via>> {
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let body = br.read_block()?;
+    if body.is_empty() {
         return Ok(None);
     }
-    let start = br.position()?;
+    let size = body.len() as u32;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
     let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
     let location = read_coord_point(br)?;
@@ -836,30 +857,35 @@ fn read_via<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Via>> {
         }
     }
 
+    via.raw_record = Some(body);
     Ok(Some(via))
 }
 
 fn read_track<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Track>> {
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let body = br.read_block()?;
+    if body.is_empty() {
         return Ok(None);
     }
-    let start = br.position()?;
+    let size = body.len() as u32;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
-    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
     let start_x = br.read_i32()?;
     let start_y = br.read_i32()?;
     let end_x = br.read_i32()?;
     let end_y = br.read_i32()?;
     let width = Coord::from_raw(br.read_i32()?);
 
+    // Post-core tail: `[u16 subPolyIndex][u8 pad]`. The component index
+    // lives in the common prefix, not here.
     let mut subnet_index = 0u16;
-    let mut component_index = 0u8;
     let block_size = u64::from(size);
     let consumed = br.position()? - start;
     if consumed + 3 <= block_size {
         subnet_index = br.read_u16()?;
-        component_index = br.read_u8()?;
+        br.skip(1)?;
     }
     let consumed = br.position()? - start;
     if block_size > consumed {
@@ -883,7 +909,7 @@ fn read_track<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Track>>
         width,
         layer: i32::from(layer),
         net_index,
-        component_index,
+        component_index: ci,
         ..Track::default()
     };
     let pf = PrimitiveFlags::decode(flags_bits);
@@ -891,6 +917,7 @@ fn read_track<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Track>>
     track.is_tenting_top = pf.is_tenting_top;
     track.is_tenting_bottom = pf.is_tenting_bottom;
     track.is_keepout = pf.is_keepout;
+    track.raw_record = Some(body);
     Ok(Some(track))
 }
 
@@ -1007,13 +1034,16 @@ fn read_text<R: Read + Seek>(
 }
 
 fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let body = br.read_block()?;
+    if body.is_empty() {
         return Ok(None);
     }
-    let start = br.position()?;
+    let size = body.len() as u32;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
-    let (layer, flags_bits, net_idx, _ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
+    let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
     let corner1 = read_coord_point(br)?;
     let corner2 = read_coord_point(br)?;
     let rotation = br.read_f64()?;
@@ -1029,6 +1059,7 @@ fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
         corner2,
         layer: i32::from(layer),
         rotation,
+        component_index: ci,
         ..Fill::default()
     };
     fill.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
@@ -1037,15 +1068,19 @@ fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
     fill.is_tenting_top = pf.is_tenting_top;
     fill.is_tenting_bottom = pf.is_tenting_bottom;
     fill.is_keepout = pf.is_keepout;
+    fill.raw_record = Some(body);
     Ok(Some(fill))
 }
 
 fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region>> {
-    let (_flags_byte, size) = br.read_block_header()?;
-    if size == 0 {
+    let body = br.read_block()?;
+    if body.is_empty() {
         return Ok(None);
     }
-    let start = br.position()?;
+    let size = body.len() as u32;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let start = 0u64;
     let cp = read_common_prefix(br)?;
     let (layer, flags_bits, net_idx, ci) = (cp.layer, cp.flags, cp.net_index, cp.component_index);
     br.skip(4)?; // reserved u32
@@ -1063,6 +1098,28 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
         let x = Coord::from_raw(br.read_f64()? as i32);
         let y = Coord::from_raw(br.read_f64()? as i32);
         region.outline.push(CoordPoint::new(x, y));
+    }
+
+    // Hole outlines follow the main outline, one [u32 n][n x (f64,f64)]
+    // list each; HOLECOUNT in the param block is authoritative.
+    let hole_count = parameters.get_i32("HOLECOUNT").unwrap_or(0).max(0);
+    for _ in 0..hole_count {
+        let remaining = u64::from(size).saturating_sub(br.position()? - start);
+        if remaining < 4 {
+            break;
+        }
+        let n = br.read_u32()? as u64;
+        let remaining = u64::from(size).saturating_sub(br.position()? - start);
+        if n * 16 > remaining {
+            break;
+        }
+        let mut hole = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            let x = Coord::from_raw(br.read_f64()? as i32);
+            let y = Coord::from_raw(br.read_f64()? as i32);
+            hole.push(CoordPoint::new(x, y));
+        }
+        region.holes.push(hole);
     }
 
     let consumed = br.position()? - start;
@@ -1241,6 +1298,7 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
     if !extra.is_empty() {
         region.additional_parameters = Some(extra);
     }
+    region.raw_record = Some(body);
     Ok(Some(region))
 }
 
@@ -1289,20 +1347,29 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     if let Some(v) = parameters.get_i32("UNIONINDEX") {
         body.union_index = v;
     }
-    if let Some(v) = parameters.get_f64("ARCRESOLUTION") {
+    // Coord-valued body parameters are mil strings ("-62.9921mil"), not
+    // raw integers.
+    let get_coord = |key: &str| -> Option<Coord> {
+        parameters
+            .get(key)
+            .and_then(super::doc_codec::parse_coord_loose)
+    };
+    if let Some(v) = get_coord("ARCRESOLUTION") {
+        body.arc_resolution = v.to_mils();
+    } else if let Some(v) = parameters.get_f64("ARCRESOLUTION") {
         body.arc_resolution = v;
     }
     if let Some(v) = parameters.get("ISSHAPEBASED") {
         body.is_shape_based = v.eq_ignore_ascii_case("TRUE");
     }
-    if let Some(v) = parameters.get_i32("CAVITYHEIGHT") {
-        body.cavity_height = Coord::from_raw(v);
+    if let Some(v) = get_coord("CAVITYHEIGHT") {
+        body.cavity_height = v;
     }
-    if let Some(v) = parameters.get_i32("STANDOFFHEIGHT") {
-        body.standoff_height = Coord::from_raw(v);
+    if let Some(v) = get_coord("STANDOFFHEIGHT") {
+        body.standoff_height = v;
     }
-    if let Some(v) = parameters.get_i32("OVERALLHEIGHT") {
-        body.overall_height = Coord::from_raw(v);
+    if let Some(v) = get_coord("OVERALLHEIGHT") {
+        body.overall_height = v;
     }
     if let Some(v) = parameters.get_i32("BODYCOLOR3D") {
         body.body_color_3d = v;
@@ -1316,10 +1383,10 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     if let Some(v) = parameters.get("MODEL.EMBED") {
         body.model_embed = v.eq_ignore_ascii_case("TRUE");
     }
-    let m2dx = parameters.get_i32("MODEL.2D.X").unwrap_or(0);
-    let m2dy = parameters.get_i32("MODEL.2D.Y").unwrap_or(0);
     if parameters.contains_key("MODEL.2D.X") || parameters.contains_key("MODEL.2D.Y") {
-        body.model_2d_location = CoordPoint::new(Coord::from_raw(m2dx), Coord::from_raw(m2dy));
+        let m2dx = get_coord("MODEL.2D.X").unwrap_or(Coord::ZERO);
+        let m2dy = get_coord("MODEL.2D.Y").unwrap_or(Coord::ZERO);
+        body.model_2d_location = CoordPoint::new(m2dx, m2dy);
     }
     if let Some(v) = parameters.get_f64("MODEL.2D.ROTATION") {
         body.model_2d_rotation = v;
@@ -1333,8 +1400,8 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     if let Some(v) = parameters.get_f64("MODEL.3D.ROTZ") {
         body.model_3d_rot_z = v;
     }
-    if let Some(v) = parameters.get_i32("MODEL.3D.DZ") {
-        body.model_3d_dz = Coord::from_raw(v);
+    if let Some(v) = get_coord("MODEL.3D.DZ") {
+        body.model_3d_dz = v;
     }
     if let Some(v) = parameters.get_i32("MODEL.CHECKSUM") {
         body.model_checksum = v;
@@ -1447,7 +1514,7 @@ impl Document {
         read_rooms(&mut cf, &mut document)?;
         read_embedded_boards(&mut cf, &mut document)?;
         resolve_net_names(&mut document);
-        assign_pads_to_components(&mut document);
+        assign_primitives_to_components(&mut document);
         read_doc_additional_streams(&mut cf, &mut document, &mut diagnostics)?;
 
         document.diagnostics = diagnostics;
@@ -1895,19 +1962,34 @@ fn resolve_net_names(document: &mut Document) {
     }
 }
 
-/// Resolve the binary `component_index` byte read from each pad to its parent
-/// component, populating the component's owned pad list.
-fn assign_pads_to_components(document: &mut Document) {
-    if document.components.is_empty() || document.pads.is_empty() {
+/// Resolve each primitive's `component_index` (from the binary common
+/// prefix) to its parent component, populating the component's owned
+/// primitive lists. The document-level lists remain the source of truth on
+/// write; the per-component lists are convenience clones for bounds /
+/// footprint-style access.
+fn assign_primitives_to_components(document: &mut Document) {
+    if document.components.is_empty() {
         return;
     }
     let count = document.components.len() as i32;
-    for pad in &document.pads {
-        let idx = pad.component_index;
-        if (0..count).contains(&idx) {
-            document.components[idx as usize].pads.push(pad.clone());
-        }
+    macro_rules! assign {
+        ($list:ident) => {
+            for prim in &document.$list {
+                let idx = prim.component_index;
+                if (0..count).contains(&idx) {
+                    document.components[idx as usize].$list.push(prim.clone());
+                }
+            }
+        };
     }
+    assign!(pads);
+    assign!(tracks);
+    assign!(arcs);
+    assign!(vias);
+    assign!(texts);
+    assign!(fills);
+    assign!(regions);
+    assign!(component_bodies);
 }
 
 fn read_doc_additional_streams(

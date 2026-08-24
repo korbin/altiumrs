@@ -148,8 +148,8 @@ fn pcblib_preserves_unique_id() {
 #[test]
 fn pcbdoc_from_scratch_with_nets_and_components() {
     let mut doc = pcb::Document::default();
-    doc.nets.push(pcb::Net { name: "VCC".into() });
-    doc.nets.push(pcb::Net { name: "GND".into() });
+    doc.nets.push(pcb::Net { name: "VCC".into(), ..Default::default() });
+    doc.nets.push(pcb::Net { name: "GND".into(), ..Default::default() });
 
     let mut comp = pcb::Component::new("R1");
     comp.x = Coord::from_mils(100.0);

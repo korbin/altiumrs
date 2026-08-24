@@ -55,7 +55,8 @@ enum Command {
     Flatten {
         /// Source `.PcbDoc` carrying embedded board references.
         path: PathBuf,
-        /// Destination `.PcbDoc`. Use `-` to print a summary without writing.
+        /// Destination `.PcbDoc`. Defaults to `<input>.flat.PcbDoc` next to
+        /// the source. Use `-` to print a summary without writing.
         #[arg(short, long)]
         output: Option<PathBuf>,
         /// Extra directories to search for sub-board files. Repeatable.
@@ -568,14 +569,18 @@ async fn cmd_flatten(
         }
     }
 
-    // `-o -` (or equivalent) prints stats only and skips the write. Anything
-    // else writes a fresh `.PcbDoc` byte stream.
-    let Some(out_path) = output else {
-        return Ok(());
+    // `-o -` prints stats only and skips the write. No `-o` writes next to
+    // the source as `<stem>.flat.PcbDoc`.
+    let default_out;
+    let out_path = match output {
+        Some(p) if p.as_os_str() == "-" => return Ok(()),
+        Some(p) => p,
+        None => {
+            let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+            default_out = parent_dir.join(format!("{stem}.flat.PcbDoc"));
+            default_out.as_path()
+        }
     };
-    if out_path.as_os_str() == "-" {
-        return Ok(());
-    }
 
     let bytes = flat
         .to_bytes()
