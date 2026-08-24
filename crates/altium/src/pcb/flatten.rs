@@ -786,6 +786,48 @@ fn merge_side_streams(
         }
     }
 
+    // Embedded 3D models: append the sub-board's `Models/Data` records and
+    // renumber its `Models/<i>` streams after the parent's, skipping model
+    // GUIDs the parent already embeds (bodies reference models by GUID).
+    if let Some(sub_md) = sub_data("Models") {
+        let model_record_id = |rec: &[u8]| -> Option<Vec<u8>> {
+            let mut probe = Vec::with_capacity(rec.len() + 1);
+            probe.push(b'|');
+            probe.extend_from_slice(rec);
+            find_value(&probe, b"|ID=").map(|(s, e)| probe[s..e].to_ascii_uppercase())
+        };
+        let mut data = out
+            .additional_streams
+            .get("Models/Data")
+            .cloned()
+            .unwrap_or_default();
+        let mut existing_ids: Vec<Vec<u8>> = param_records(&data)
+            .iter()
+            .filter_map(|r| model_record_id(r))
+            .collect();
+        let mut idx = 0usize;
+        while out.additional_streams.contains_key(&format!("Models/{idx}")) {
+            idx += 1;
+        }
+        for (i, rec) in param_records(sub_md).iter().enumerate() {
+            let Some(stream) = sub.additional_streams.get(&format!("Models/{i}")) else {
+                continue;
+            };
+            let id = model_record_id(rec);
+            if let Some(id) = &id {
+                if existing_ids.contains(id) {
+                    continue;
+                }
+                existing_ids.push(id.clone());
+            }
+            push_record(&mut data, rec);
+            out.additional_streams
+                .insert(format!("Models/{idx}"), stream.clone());
+            idx += 1;
+        }
+        set_stream(out, "Models", data, idx as u32);
+    }
+
     // PrimitiveGuids is positional and can't be merged; Altium will
     // regenerate GUIDs for the sub-board's primitives.
     if sub_data("PrimitiveGuids").is_some() {

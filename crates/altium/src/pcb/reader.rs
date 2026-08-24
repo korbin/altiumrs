@@ -231,71 +231,13 @@ fn read_library(
 }
 
 fn read_models(cf: &mut CompoundFile, library: &mut Library) -> Result<()> {
-    let mut metas: Vec<BTreeMap<String, String>> = Vec::new();
-    if let Some(data) = cf.try_read_stream("Library/Models/Data")? {
-        let mut br = BinaryReader::new(Cursor::new(data))?;
-        while br.has_more()? {
-            let len = br.read_i32()?;
-            if len <= 0 {
-                break;
-            }
-            let mut buf = vec![0u8; len as usize];
-            br.read_exact(&mut buf)?;
-            let s = encoding::decode(&strip_nulls(&buf));
-            let mut meta = BTreeMap::new();
-            for part in s.split('|').filter(|p| !p.is_empty()) {
-                if let Some(eq) = part.find('=') {
-                    meta.insert(part[..eq].to_uppercase(), part[eq + 1..].to_owned());
-                }
-            }
-            metas.push(meta);
-        }
-    }
-
-    for i in 0.. {
-        let path = format!("Library/Models/{i}");
-        let Some(compressed) = cf.try_read_stream(&path)? else {
-            break;
-        };
-        let mut model = Model3d::default();
-        if let Some(meta) = metas.get(i) {
-            if let Some(v) = meta.get("ID") {
-                model.id = v.clone();
-            }
-            if let Some(v) = meta.get("NAME") {
-                model.name = v.clone();
-            }
-            if let Some(v) = meta.get("EMBED") {
-                model.is_embedded = v.eq_ignore_ascii_case("TRUE");
-            }
-            if let Some(v) = meta.get("MODELSOURCE") {
-                model.model_source = v.clone();
-            }
-            if let Some(v) = meta.get("ROTX").and_then(|x| x.parse().ok()) {
-                model.rotation_x = v;
-            }
-            if let Some(v) = meta.get("ROTY").and_then(|x| x.parse().ok()) {
-                model.rotation_y = v;
-            }
-            if let Some(v) = meta.get("ROTZ").and_then(|x| x.parse().ok()) {
-                model.rotation_z = v;
-            }
-            if let Some(v) = meta.get("DZ").and_then(|x| x.parse().ok()) {
-                model.dz = v;
-            }
-            if let Some(v) = meta.get("CHECKSUM").and_then(|x| x.parse().ok()) {
-                model.checksum = v;
-            }
-        }
-        if !compressed.is_empty() {
-            let mut decoder = ZlibDecoder::new(&compressed[..]);
-            let mut step = Vec::new();
-            decoder.read_to_end(&mut step).map_err(Error::Io)?;
-            model.step_data = String::from_utf8_lossy(&step).into_owned();
-        }
-        library.models.push(model);
-    }
-
+    let metas = match cf.try_read_stream("Library/Models/Data")? {
+        Some(data) => super::model3d::parse_models_data(&data),
+        None => Vec::new(),
+    };
+    library.models = super::model3d::build_models(&metas, |i| {
+        cf.try_read_stream(format!("Library/Models/{i}")).ok().flatten()
+    })?;
     Ok(())
 }
 

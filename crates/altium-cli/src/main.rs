@@ -147,6 +147,45 @@ enum Command {
         #[arg(long)]
         include_no_bom: bool,
     },
+    /// Extract every embedded 3D (STEP) model from a `.PcbDoc`, `.PcbLib`,
+    /// or `.IntLib` into a directory, decompressed. Identical duplicates
+    /// are written once; same-named distinct models get a numeric suffix.
+    ExportModels {
+        /// Source `.PcbDoc`, `.PcbLib`, or `.IntLib`.
+        path: PathBuf,
+        /// Output directory. Created if it doesn't exist.
+        #[arg(short, long)]
+        out_dir: PathBuf,
+    },
+    /// Run a jq filter over any supported file's JSON model (the same
+    /// shape as `to-json`'s "document" object). Examples:
+    /// `.components | length`, `[.nets[].name]`,
+    /// `.components[] | select(.source_designator == "R16")`.
+    Query {
+        /// Source file (any kind `to-json` supports).
+        path: PathBuf,
+        /// jq filter expression.
+        filter: String,
+        /// Compact one-line-per-value output instead of pretty-printed.
+        #[arg(long)]
+        compact: bool,
+        /// Print string results raw, without JSON quoting (like `jq -r`).
+        #[arg(short = 'r', long)]
+        raw: bool,
+    },
+    /// Print the design rules (DRC) of a `.PcbDoc`. Coordinate values are
+    /// shown in the document's display unit (mm for metric documents).
+    Rules {
+        /// Source `.PcbDoc`.
+        path: PathBuf,
+        /// Output format: `text` (default) or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+        /// Unit for coordinate values: `auto` (document display unit,
+        /// default), `mm`, or `mil`.
+        #[arg(long, default_value = "auto")]
+        units: String,
+    },
 }
 
 #[tokio::main]
@@ -189,6 +228,18 @@ async fn main() -> Result<()> {
             absolute,
             include_no_bom,
         } => cmd_pnp(&path, output.as_deref(), &format, &units, absolute, include_no_bom).await,
+        Command::ExportModels { path, out_dir } => cmd_export_models(&path, &out_dir).await,
+        Command::Query {
+            path,
+            filter,
+            compact,
+            raw,
+        } => cmd_query(&path, &filter, compact, raw).await,
+        Command::Rules {
+            path,
+            format,
+            units,
+        } => cmd_rules(&path, &format, &units).await,
         Command::Split {
             path,
             out_dir,
@@ -672,6 +723,286 @@ async fn cmd_pnp(
         eprintln!("note: {missing} component(s) have no designator (blank in output)");
     }
     emit_output(output, &format_pnp_csv(&entries, format, units))
+}
+
+/// The file's JSON model — the same object `to-json` puts in "document".
+async fn document_json(path: &Path) -> Result<String> {
+    let file = AltiumFile::read(path).await?;
+    Ok(match &file {
+        AltiumFile::PcbDocument(d) => serde_json::to_string(d)?,
+        AltiumFile::PcbLibrary(d) => serde_json::to_string(d)?,
+        AltiumFile::SchDocument(d) => serde_json::to_string(d)?,
+        AltiumFile::SchLibrary(d) => serde_json::to_string(d)?,
+        AltiumFile::IntegratedLibrary(d) => serde_json::to_string(d)?,
+        AltiumFile::LibraryPackage(d) => serde_json::to_string(d)?,
+        AltiumFile::BomDocument(d) => serde_json::to_string(d)?,
+    })
+}
+
+async fn cmd_query(path: &Path, filter_code: &str, compact: bool, raw: bool) -> Result<()> {
+    use jaq_core::load::{Arena, File, Loader};
+    use jaq_core::{Compiler, Ctx, Vars, data, unwrap_valr};
+    use jaq_json::{Val, read};
+
+    let json = document_json(path).await?;
+    let input = read::parse_single(json.as_bytes())
+        .map_err(|e| anyhow!("internal: model JSON did not parse: {e:?}"))?;
+
+    let program = File {
+        code: filter_code,
+        path: (),
+    };
+    let defs = jaq_core::defs()
+        .chain(jaq_std::defs())
+        .chain(jaq_json::defs());
+    let funs = jaq_core::funs()
+        .chain(jaq_std::funs())
+        .chain(jaq_json::funs());
+    let loader = Loader::new(defs);
+    let arena = Arena::default();
+    let modules = loader
+        .load(&arena, program)
+        .map_err(|e| anyhow!("filter parse error: {e:?}"))?;
+    let filter = Compiler::default()
+        .with_funs(funs)
+        .compile(modules)
+        .map_err(|e| anyhow!("filter compile error: {e:?}"))?;
+
+    let ctx = Ctx::<data::JustLut<Val>>::new(&filter.lut, Vars::new([]));
+    for v in filter.id.run((ctx, input)).map(unwrap_valr) {
+        let v = v.map_err(|e| anyhow!("filter error: {e:?}"))?;
+        match &v {
+            Val::TStr(s) if raw => println!("{}", String::from_utf8_lossy(s)),
+            _ if compact => println!("{v}"),
+            _ => {
+                // Pretty-print by re-parsing the compact form; fall back to
+                // compact if the value isn't plain JSON.
+                let compact_text = v.to_string();
+                match serde_json::from_str::<serde_json::Value>(&compact_text) {
+                    Ok(j) => println!("{}", serde_json::to_string_pretty(&j)?),
+                    Err(_) => println!("{compact_text}"),
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `"0.09mm"`-style rendering with trailing zeros trimmed.
+fn format_mm(c: altium::Coord) -> String {
+    let mut s = format!("{:.4}", c.to_mm());
+    while s.ends_with('0') {
+        s.pop();
+    }
+    if s.ends_with('.') {
+        s.pop();
+    }
+    format!("{s}mm")
+}
+
+/// Convert a rule parameter value for display: mil-suffixed coords become
+/// mm, and the raw-unit clearance matrix (`OBJECTCLEARANCES`) is rewritten
+/// pair by pair. Everything else passes through untouched.
+fn rule_value_in_mm(key: &str, value: &str) -> String {
+    if key.eq_ignore_ascii_case("OBJECTCLEARANCES") {
+        return value
+            .split(';')
+            .map(|pair| match pair.rsplit_once(':') {
+                Some((name, raw)) => match raw.trim().parse::<i32>() {
+                    Ok(raw) => format!("{name}:{}", format_mm(altium::Coord::from_raw(raw))),
+                    Err(_) => pair.to_string(),
+                },
+                None => pair.to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join(";");
+    }
+    if let Some(num) = value.strip_suffix("mil") {
+        if let Ok(mils) = num.trim().parse::<f64>() {
+            return format_mm(altium::Coord::from_mils(mils));
+        }
+    }
+    value.to_string()
+}
+
+async fn cmd_rules(path: &Path, format: &str, units: &str) -> Result<()> {
+    let file = AltiumFile::read(path).await?;
+    let AltiumFile::PcbDocument(doc) = file else {
+        return Err(anyhow!("rules requires a .PcbDoc"));
+    };
+    let metric = match units.to_ascii_lowercase().as_str() {
+        "auto" => doc.display_unit() == Some(0),
+        "mm" => true,
+        "mil" => false,
+        other => return Err(anyhow!("unknown units {other:?} (auto|mm|mil)")),
+    };
+    match format.to_ascii_lowercase().as_str() {
+        "json" => println!("{}", serde_json::to_string_pretty(&doc.rules)?),
+        "text" => {
+            let mut rules: Vec<_> = doc.rules.iter().collect();
+            rules.sort_by(|a, b| {
+                (&a.rule_kind, a.priority, &a.name).cmp(&(&b.rule_kind, b.priority, &b.name))
+            });
+            let mut last_kind = "";
+            for r in rules {
+                if r.rule_kind != last_kind {
+                    println!("[{}]", r.rule_kind);
+                    last_kind = &r.rule_kind;
+                }
+                let flag = if r.enabled { "" } else { " [disabled]" };
+                println!("  {} (priority {}){}", r.name, r.priority, flag);
+                if !r.scope1_expression.is_empty() || !r.scope2_expression.is_empty() {
+                    if r.scope2_expression.is_empty() {
+                        println!("    scope: {}", r.scope1_expression);
+                    } else {
+                        println!(
+                            "    scope: {}  vs  {}",
+                            r.scope1_expression, r.scope2_expression
+                        );
+                    }
+                }
+                if !r.comment.is_empty() {
+                    println!("    comment: {}", r.comment);
+                }
+                // Boilerplate and typed-field duplicates stay out of the
+                // text view; `--format json` has everything.
+                const NOISE: &[&str] = &[
+                    "SELECTION",
+                    "LAYER",
+                    "LOCKED",
+                    "POLYGONOUTLINE",
+                    "USERROUTED",
+                    "KEEPOUT",
+                    "UNIONINDEX",
+                    "RULEKIND",
+                    "NAME",
+                    "ENABLED",
+                    "PRIORITY",
+                    "COMMENT",
+                    "UNIQUEID",
+                    "SCOPE1EXPRESSION",
+                    "SCOPE2EXPRESSION",
+                    "DEFINEDBYLOGICALDOCUMENT",
+                ];
+                let params: Vec<String> = r
+                    .parameters
+                    .iter()
+                    .filter(|(k, v)| !v.is_empty() && !NOISE.contains(&k.to_uppercase().as_str()))
+                    .map(|(k, v)| {
+                        if metric {
+                            format!("{k}={}", rule_value_in_mm(k, v))
+                        } else {
+                            format!("{k}={v}")
+                        }
+                    })
+                    .collect();
+                if !params.is_empty() {
+                    println!("    {}", params.join(" | "));
+                }
+            }
+            println!("{} rule(s)", doc.rules.len());
+        }
+        other => return Err(anyhow!("unknown format {other:?} (text|json)")),
+    }
+    Ok(())
+}
+
+async fn cmd_export_models(path: &Path, out_dir: &Path) -> Result<()> {
+    let file = AltiumFile::read(path).await?;
+    // (source label, model) pairs; the label only disambiguates IntLib output.
+    let mut models: Vec<(String, altium::pcb::Model3d)> = Vec::new();
+    match file {
+        AltiumFile::PcbDocument(doc) => {
+            models.extend(doc.embedded_models()?.into_iter().map(|m| (String::new(), m)));
+        }
+        AltiumFile::PcbLibrary(lib) => {
+            models.extend(lib.models.into_iter().map(|m| (String::new(), m)));
+        }
+        AltiumFile::IntegratedLibrary(intlib) => {
+            for lib in intlib.footprint_libraries {
+                models.extend(
+                    lib.library
+                        .models
+                        .into_iter()
+                        .map(|m| (lib.name.clone(), m)),
+                );
+            }
+        }
+        other => {
+            return Err(anyhow!(
+                "export-models requires .PcbDoc, .PcbLib, or .IntLib; got {}",
+                kind_label(&other)
+            ));
+        }
+    }
+
+    let empty = models.iter().filter(|(_, m)| m.step_data.is_empty()).count();
+    models.retain(|(_, m)| !m.step_data.is_empty());
+    if models.is_empty() {
+        println!("no embedded models found ({empty} entries without data)");
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(out_dir)
+        .with_context(|| format!("create {}", out_dir.display()))?;
+
+    // Written name → content, for dedup and collision suffixing.
+    let mut written: std::collections::BTreeMap<String, String> = Default::default();
+    let mut saved = 0usize;
+    let mut deduped = 0usize;
+    for (i, (source, model)) in models.iter().enumerate() {
+        let raw_name = if model.name.is_empty() {
+            format!("model-{i}.step")
+        } else {
+            model.name.clone()
+        };
+        let base: String = raw_name
+            .chars()
+            .map(|c| if matches!(c, '/' | '\\' | ':') { '_' } else { c })
+            .collect();
+        let base = if source.is_empty() {
+            base
+        } else {
+            format!("{source}-{base}")
+        };
+
+        // Reuse the name for identical content; suffix distinct content.
+        let mut name = base.clone();
+        let mut n = 2;
+        loop {
+            match written.get(&name) {
+                None => break,
+                Some(existing) if existing == &model.step_data => break,
+                Some(_) => {
+                    let (stem, ext) = match base.rsplit_once('.') {
+                        Some((s, e)) => (s.to_string(), format!(".{e}")),
+                        None => (base.clone(), String::new()),
+                    };
+                    name = format!("{stem}-{n}{ext}");
+                    n += 1;
+                }
+            }
+        }
+        if written.contains_key(&name) {
+            deduped += 1;
+            continue;
+        }
+        let dest = out_dir.join(&name);
+        std::fs::write(&dest, model.step_data.as_bytes())
+            .with_context(|| format!("write {}", dest.display()))?;
+        println!("wrote {}", dest.display());
+        written.insert(name, model.step_data.clone());
+        saved += 1;
+    }
+    let mut summary = format!("{saved} model(s) written to {}", out_dir.display());
+    if deduped > 0 {
+        summary.push_str(&format!(", {deduped} identical duplicate(s) skipped"));
+    }
+    if empty > 0 {
+        summary.push_str(&format!(", {empty} entr(ies) without embedded data"));
+    }
+    println!("{summary}");
+    Ok(())
 }
 
 async fn cmd_flatten(

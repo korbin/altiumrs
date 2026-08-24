@@ -105,6 +105,20 @@ impl Document {
         origin
     }
 
+    /// Embedded 3D models from the document's root `Models` storage
+    /// (`Models/Data` metadata + zlib-compressed `Models/<i>` streams),
+    /// with the STEP text decompressed. Empty when the document embeds no
+    /// models.
+    pub fn embedded_models(&self) -> Result<Vec<super::Model3d>> {
+        let metas = match self.additional_streams.get("Models/Data") {
+            Some(data) => super::model3d::parse_models_data(data),
+            None => Vec::new(),
+        };
+        super::model3d::build_models(&metas, |i| {
+            self.additional_streams.get(&format!("Models/{i}")).cloned()
+        })
+    }
+
     /// Bounding box of every primitive directly referenced by the document.
     pub fn bounds(&self) -> CoordRect {
         let mut acc = CoordRect::EMPTY;
