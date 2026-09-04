@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use super::component::Component;
 use super::model3d::Model3d;
 use crate::diagnostic::Diagnostic;
+use crate::parameter::ParameterMap;
 
 /// A PCB footprint library.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -26,16 +27,27 @@ pub struct Library {
     /// Section keys mapping component name → OLE storage name (used when names
     /// exceed 31 chars or contain `/`).
     pub section_keys: BTreeMap<String, String>,
+    /// Order of the `SectionKeys` stream as found in the file (Altium keeps
+    /// its own insertion order, which is not quite the component order).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub section_key_order: Vec<String>,
 
-    /// Raw library-level parameter dictionary.
-    pub library_parameters: Option<BTreeMap<String, String>>,
+    /// Library-level parameter record (`Library/Data`), in file order.
+    /// Serialised as ordered `[name, value, is_utf8]` triples.
+    pub library_parameters: Option<ParameterMap>,
 
     /// Additional streams beneath `Library/` (e.g. `ComponentParamsTOC`,
     /// `EmbeddedFonts`, `PadViaLibrary`).
-    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_map")
+    )]
     pub additional_library_streams: BTreeMap<String, Vec<u8>>,
     /// Additional root-level storages (e.g. `FileVersionInfo`).
-    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_map")
+    )]
     pub additional_root_streams: BTreeMap<String, Vec<u8>>,
 }
 

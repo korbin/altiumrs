@@ -6,7 +6,10 @@ use std::path::Path;
 
 use tokio::io::AsyncRead;
 
-use super::binary::{SchRecordType, decode_binary_pin, read_compressed_storage};
+use super::binary::{
+    PinTextCustomisation, SchRecordType, decode_binary_pin, decode_pin_text_customisation,
+    read_compressed_storage,
+};
 use super::codec;
 use super::component::{Component, RawRecord};
 use super::document::Document;
@@ -15,7 +18,6 @@ use super::library::Library;
 use super::primitives::Pin;
 use crate::binary::BinaryReader;
 use crate::compound::CompoundFile;
-use crate::encoding;
 use crate::error::Result;
 use crate::parameter::ParameterMap;
 
@@ -104,8 +106,7 @@ fn read_file_header(cf: &mut CompoundFile, library: &mut Library) -> Result<Vec<
         return Ok(Vec::new());
     };
     let mut br = BinaryReader::new(Cursor::new(data))?;
-    let raw = read_param_block(&mut br)?;
-    let params = ParameterMap::parse(&raw);
+    let params = read_param_block(&mut br)?;
 
     for (name, value, _) in params.iter() {
         library
@@ -145,8 +146,7 @@ fn read_section_keys(cf: &mut CompoundFile) -> Result<BTreeMap<String, String>> 
         return Ok(map);
     }
     let mut br = BinaryReader::new(Cursor::new(data))?;
-    let raw = read_param_block(&mut br)?;
-    let params = ParameterMap::parse(&raw);
+    let params = read_param_block(&mut br)?;
     let Some(count) = params.get_i32("KEYCOUNT") else {
         return Ok(map);
     };
@@ -216,10 +216,11 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
 
     let mut pin_frac: Option<Vec<u8>> = None;
     let mut pin_symbol_line_width: Option<Vec<u8>> = None;
+    let mut pin_text_data: Option<Vec<u8>> = None;
     let mut additional_streams: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     // Capture auxiliary streams.
-    let known: &[&str] = &["Data", "PinFrac", "PinSymbolLineWidth"];
+    let known: &[&str] = &["Data", "PinFrac", "PinSymbolLineWidth", "PinTextData"];
     let entries = cf.list_children(section_key)?;
     for entry in entries {
         if entry.name.eq_ignore_ascii_case("Data") {
@@ -232,6 +233,10 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
         if entry.name.eq_ignore_ascii_case("PinSymbolLineWidth") && entry.is_stream {
             pin_symbol_line_width =
                 Some(cf.read_stream(format!("{section_key}/PinSymbolLineWidth"))?);
+            continue;
+        }
+        if entry.name.eq_ignore_ascii_case("PinTextData") && entry.is_stream {
+            pin_text_data = Some(cf.read_stream(format!("{section_key}/PinTextData"))?);
             continue;
         }
         if known.iter().any(|n| entry.name.eq_ignore_ascii_case(n)) {
@@ -273,8 +278,7 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
                 }
             }
         } else {
-            let raw = decode_param_body(&body);
-            ParameterMap::parse(&raw)
+            decode_param_body(&body)
         };
 
         let record = params.get_i32("RECORD");
@@ -448,8 +452,79 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
     if let Some(bytes) = pin_symbol_line_width {
         apply_pin_symbol_line_width(&mut component.pins, &bytes);
     }
+    if let Some(bytes) = pin_text_data {
+        apply_pin_text_data(&mut component.pins, &bytes);
+    }
 
     Ok(Some(component))
+}
+
+/// Per-pin font / colour / position customisations. Altium's canvas reads
+/// these from the `PinTextData` stream (indexed by pin position), not from
+/// the pin record, so this is where the typed `*_font_mode`,
+/// `*_custom_font_id`, `*_custom_color` and `*_position_mode` fields come
+/// from. The writer regenerates the stream from those fields.
+fn apply_pin_text_data(pins: &mut [Pin], data: &[u8]) {
+    let _ = read_compressed_storage(data, |name, decoded| {
+        let Some(idx) = name.parse::<usize>().ok() else {
+            return Ok(());
+        };
+        let Some(pin) = pins.get_mut(idx) else {
+            return Ok(());
+        };
+        let mut pos = 0usize;
+        let Some(designator) = decode_pin_text_customisation(decoded, &mut pos) else {
+            return Ok(());
+        };
+        let Some(name_text) = decode_pin_text_customisation(decoded, &mut pos) else {
+            return Ok(());
+        };
+        apply_pin_text_customisation(
+            &designator,
+            &mut pin.designator_font_mode,
+            &mut pin.designator_custom_font_id,
+            &mut pin.designator_custom_color,
+            &mut pin.designator_position_mode,
+            &mut pin.designator_custom_position_margin,
+            &mut pin.designator_custom_position_rotation_anchor,
+            &mut pin.designator_custom_position_rotation_relative,
+        );
+        apply_pin_text_customisation(
+            &name_text,
+            &mut pin.name_font_mode,
+            &mut pin.name_custom_font_id,
+            &mut pin.name_custom_color,
+            &mut pin.name_position_mode,
+            &mut pin.name_custom_position_margin,
+            &mut pin.name_custom_position_rotation_anchor,
+            &mut pin.name_custom_position_rotation_relative,
+        );
+        Ok(())
+    });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_pin_text_customisation(
+    c: &PinTextCustomisation,
+    font_mode: &mut i32,
+    custom_font_id: &mut i32,
+    custom_color: &mut i32,
+    position_mode: &mut i32,
+    margin: &mut i32,
+    rotation_anchor: &mut i32,
+    rotation_relative: &mut bool,
+) {
+    if c.custom_font {
+        *font_mode = 1;
+        *custom_font_id = i32::from(c.font_id);
+        *custom_color = c.color;
+    }
+    if c.custom_position {
+        *position_mode = 1;
+        *margin = c.margin;
+    }
+    *rotation_anchor = i32::from(c.rotation_anchor);
+    *rotation_relative = c.rotation_relative;
 }
 
 fn apply_pin_frac(pins: &mut [Pin], data: &[u8]) {
@@ -509,12 +584,13 @@ fn apply_pin_symbol_line_width(pins: &mut [Pin], data: &[u8]) {
     });
 }
 
-fn decode_param_body(bytes: &[u8]) -> String {
+/// Decode a NUL-terminated parameter record, honouring `%UTF8%` twins.
+fn decode_param_body(bytes: &[u8]) -> ParameterMap {
     let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-    encoding::decode(&bytes[..end])
+    ParameterMap::parse_bytes(&bytes[..end], b'|')
 }
 
-fn read_param_block<R: Read + std::io::Seek>(br: &mut BinaryReader<R>) -> Result<String> {
+fn read_param_block<R: Read + std::io::Seek>(br: &mut BinaryReader<R>) -> Result<ParameterMap> {
     let bytes = br.read_block()?;
     Ok(decode_param_body(&bytes))
 }
@@ -627,8 +703,7 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 }
             }
         } else {
-            let raw = decode_param_body(&body);
-            ParameterMap::parse(&raw)
+            decode_param_body(&body)
         };
 
         let record = params.get_i32("RECORD");
@@ -786,12 +861,16 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 // Entries follow their connector, like sheet entries follow
                 // their sheet symbol.
                 match document.harness_connectors.last_mut() {
-                    Some(parent) => parent.entries.push(codec::harness_entry_from_params(&params)),
+                    Some(parent) => parent
+                        .entries
+                        .push(codec::harness_entry_from_params(&params)),
                     None => handled = false,
                 }
             }
             Some(SchRecordType::HarnessType) => match document.harness_connectors.last_mut() {
-                Some(parent) => parent.harness_type = Some(codec::harness_type_from_params(&params)),
+                Some(parent) => {
+                    parent.harness_type = Some(codec::harness_type_from_params(&params))
+                }
                 None => handled = false,
             },
             Some(SchRecordType::SignalHarness) => {
@@ -894,7 +973,9 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
         if template_record.is_some() {
             document.template_record = template_record;
         }
-        document.sheet_name_annotations.extend(sheet_name_annotations);
+        document
+            .sheet_name_annotations
+            .extend(sheet_name_annotations);
         document
             .sheet_filename_annotations
             .extend(sheet_filename_annotations);

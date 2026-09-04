@@ -121,8 +121,9 @@ pub struct Component {
     /// Records read from the `Data` stream, kept verbatim so round-tripping is
     /// byte-for-byte (within the data block).
     pub raw_records: Vec<RawRecord>,
-    /// Streams beneath the component's storage that we don't model (e.g.
-    /// `PinFrac`, `PinSymbolLineWidth`, `PinTextData`).
+    /// Streams beneath the component's storage that we don't model
+    /// (`PinFrac`, `PinSymbolLineWidth` and `PinTextData` are decoded into
+    /// the typed pins instead).
     #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_map"))]
     pub additional_streams: BTreeMap<String, Vec<u8>>,
 }

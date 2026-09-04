@@ -17,6 +17,18 @@ pub struct Implementation {
     pub data_file_kinds: Vec<String>,
     pub data_file_entities: Vec<String>,
     pub is_current: bool,
+    /// `IntegratedModel=T`: the model lives in the same IntLib/vault item.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub integrated_model: bool,
+    /// `DatabaseModel=T`: the model came from a database/vault library.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub database_model: bool,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_item_guid: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_revision_guid: Option<String>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub model_vault_guid: Option<String>,
     pub map_definers: Vec<MapDefiner>,
     pub common: PrimitiveCommon,
 }

@@ -240,6 +240,108 @@ pub fn decode_binary_pin(body: &[u8]) -> Result<Option<ParameterMap>> {
     Ok(Some(params))
 }
 
+/// Position / font customisation of one pin text (designator or name) as
+/// stored in a component's `PinTextData` stream. Each stream entry is the
+/// designator block followed by the name block; every block is a flag byte
+/// followed by the groups the flags enable:
+///
+/// ```text
+/// flags: u8
+/// [flags & 0x01] margin: i32        custom position, raw internal units
+/// [flags & 0x02]                    rotation anchor (no payload)
+/// [flags & 0x04]                    rotation relative (no payload)
+/// [flags & 0x10] font_id: u8, 0u8, color: i32   custom font (+ colour, BGR)
+/// ```
+///
+/// Verified against every entry in the libraries on hand (36k pins); the
+/// two payload-less bits are mapped to the `CUSTOMPOSITION.ROTATIONANCHOR`
+/// / `ROTATIONRELATIVE` pin properties in that order, which is the one
+/// assignment not confirmed by a sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PinTextCustomisation {
+    pub custom_position: bool,
+    /// Raw internal units (1/10000 mil), like `Coord::to_raw`.
+    pub margin: i32,
+    pub rotation_anchor: bool,
+    pub rotation_relative: bool,
+    pub custom_font: bool,
+    /// Index into the FileHeader font table.
+    pub font_id: u8,
+    /// BGR colour, meaningful only with `custom_font`.
+    pub color: i32,
+}
+
+const PIN_TEXT_FLAG_POSITION: u8 = 0x01;
+const PIN_TEXT_FLAG_ROTATION_ANCHOR: u8 = 0x02;
+const PIN_TEXT_FLAG_ROTATION_RELATIVE: u8 = 0x04;
+const PIN_TEXT_FLAG_FONT: u8 = 0x10;
+const PIN_TEXT_KNOWN_FLAGS: u8 = PIN_TEXT_FLAG_POSITION
+    | PIN_TEXT_FLAG_ROTATION_ANCHOR
+    | PIN_TEXT_FLAG_ROTATION_RELATIVE
+    | PIN_TEXT_FLAG_FONT;
+
+impl PinTextCustomisation {
+    pub fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// Decode one customisation block starting at `*pos`, advancing `pos` past
+/// it. Returns `None` (leaving `pos` untouched) on truncation or unknown
+/// flag bits.
+pub fn decode_pin_text_customisation(bytes: &[u8], pos: &mut usize) -> Option<PinTextCustomisation> {
+    let mut p = *pos;
+    let flags = *bytes.get(p)?;
+    p += 1;
+    if flags & !PIN_TEXT_KNOWN_FLAGS != 0 {
+        return None;
+    }
+    let mut c = PinTextCustomisation {
+        custom_position: flags & PIN_TEXT_FLAG_POSITION != 0,
+        rotation_anchor: flags & PIN_TEXT_FLAG_ROTATION_ANCHOR != 0,
+        rotation_relative: flags & PIN_TEXT_FLAG_ROTATION_RELATIVE != 0,
+        custom_font: flags & PIN_TEXT_FLAG_FONT != 0,
+        ..Default::default()
+    };
+    if c.custom_position {
+        c.margin = i32::from_le_bytes(bytes.get(p..p + 4)?.try_into().ok()?);
+        p += 4;
+    }
+    if c.custom_font {
+        c.font_id = *bytes.get(p)?;
+        c.color = i32::from_le_bytes(bytes.get(p + 2..p + 6)?.try_into().ok()?);
+        p += 6;
+    }
+    *pos = p;
+    Some(c)
+}
+
+/// Inverse of [`decode_pin_text_customisation`].
+pub fn encode_pin_text_customisation(c: &PinTextCustomisation, out: &mut Vec<u8>) {
+    let mut flags = 0u8;
+    if c.custom_position {
+        flags |= PIN_TEXT_FLAG_POSITION;
+    }
+    if c.rotation_anchor {
+        flags |= PIN_TEXT_FLAG_ROTATION_ANCHOR;
+    }
+    if c.rotation_relative {
+        flags |= PIN_TEXT_FLAG_ROTATION_RELATIVE;
+    }
+    if c.custom_font {
+        flags |= PIN_TEXT_FLAG_FONT;
+    }
+    out.push(flags);
+    if c.custom_position {
+        out.extend_from_slice(&c.margin.to_le_bytes());
+    }
+    if c.custom_font {
+        out.push(c.font_id);
+        out.push(0);
+        out.extend_from_slice(&c.color.to_le_bytes());
+    }
+}
+
 /// Decompress a zlib-wrapped buffer into a `Vec<u8>`.
 pub fn zlib_decompress(input: &[u8]) -> Result<Vec<u8>> {
     let mut decoder = flate2::read::ZlibDecoder::new(input);

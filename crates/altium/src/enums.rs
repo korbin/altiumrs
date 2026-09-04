@@ -220,8 +220,10 @@ repr_enum! {
 repr_enum! {
     /// Built-in stroke font for PCB stroke text.
     pub enum PcbStrokeFont {
-        Default = 0,
-        SansSerif = 1,
+        /// No stroke font recorded (seen on some TrueType texts).
+        Unset = 0,
+        Default = 1,
+        SansSerif = 2,
         Serif = 3,
     }
 }
@@ -240,6 +242,41 @@ repr_enum! {
         TopLeft = 6,
         TopCenter = 7,
         TopRight = 8,
+    }
+}
+
+impl TextJustification {
+    /// Decode Altium's PCB `TTextAutoposition` byte (0 = manual, then 1..=9
+    /// column-major from the top-left) as stored at offset 132 of a PCB text
+    /// record. Returns `None` for 0 (manual) and out-of-range values.
+    pub fn from_pcb_autoposition(byte: u8) -> Option<Self> {
+        Some(match byte {
+            1 => Self::TopLeft,
+            2 => Self::MiddleLeft,
+            3 => Self::BottomLeft,
+            4 => Self::TopCenter,
+            5 => Self::MiddleCenter,
+            6 => Self::BottomCenter,
+            7 => Self::TopRight,
+            8 => Self::MiddleRight,
+            9 => Self::BottomRight,
+            _ => return None,
+        })
+    }
+
+    /// Inverse of [`Self::from_pcb_autoposition`].
+    pub fn to_pcb_autoposition(self) -> u8 {
+        match self {
+            Self::TopLeft => 1,
+            Self::MiddleLeft => 2,
+            Self::BottomLeft => 3,
+            Self::TopCenter => 4,
+            Self::MiddleCenter => 5,
+            Self::BottomCenter => 6,
+            Self::TopRight => 7,
+            Self::MiddleRight => 8,
+            Self::BottomRight => 9,
+        }
     }
 }
 

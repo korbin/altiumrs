@@ -27,6 +27,11 @@ pub struct Model3d {
     pub checksum: i32,
     /// STEP text (ISO-10303-21). Decompressed on read; compressed on write.
     pub step_data: String,
+    /// Set when the payload was not valid UTF-8 (STEP files from Chinese
+    /// CAD tools carry GBK names): `step_data` then holds one char per byte
+    /// so the original bytes are written back unchanged.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub step_data_is_latin1: bool,
 }
 
 /// Parse a `Models/Data` stream: `[i32 len][param bytes]` records.
@@ -98,7 +103,13 @@ pub(crate) fn build_models(
         }
         if !compressed.is_empty() {
             let step = crate::sch::binary::zlib_decompress(&compressed)?;
-            model.step_data = String::from_utf8_lossy(&step).into_owned();
+            match String::from_utf8(step) {
+                Ok(s) => model.step_data = s,
+                Err(e) => {
+                    model.step_data = e.into_bytes().iter().map(|&b| b as char).collect();
+                    model.step_data_is_latin1 = true;
+                }
+            }
         }
         models.push(model);
     }

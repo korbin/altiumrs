@@ -22,7 +22,38 @@ pub(crate) struct PrimitiveFlags {
     pub is_tenting_top: bool,
     pub is_tenting_bottom: bool,
     pub is_keepout: bool,
+    pub is_polygon_outline: bool,
+    pub is_teardrop: bool,
+    pub is_testpoint_fab_top: bool,
+    pub is_testpoint_fab_bottom: bool,
+    /// Flag bits not modelled as booleans (bit 3, `FLAG_ALTIUM_NATIVE`, and
+    /// anything unknown); carried through verbatim so a rewrite does not
+    /// change them.
+    pub extra: u16,
 }
+
+/// Bit 1: the track/arc is the outline of a polygon pour.
+pub const FLAG_POLYGON_OUTLINE: u16 = 0x02;
+/// Bit 3: set by Altium on every primitive it creates itself. Third-party
+/// writers (EasyEDA/LCSC exports, for instance) leave it clear and Altium keeps
+/// whatever it finds, so it is preserved verbatim through `extra` and set by
+/// default on primitives built from scratch. Its meaning is not documented.
+pub const FLAG_ALTIUM_NATIVE: u16 = 0x08;
+/// Bit 4: the region is a teardrop.
+pub const FLAG_TEARDROP: u16 = 0x10;
+/// Bit 7: fabrication test point on the top side (pads and vias).
+pub const FLAG_TESTPOINT_FAB_TOP: u16 = 0x80;
+/// Bit 8: fabrication test point on the bottom side (pads and vias).
+pub const FLAG_TESTPOINT_FAB_BOTTOM: u16 = 0x100;
+
+const KNOWN_FLAGS: u16 = FLAG_UNLOCKED
+    | FLAG_POLYGON_OUTLINE
+    | FLAG_TEARDROP
+    | FLAG_TENTING_TOP
+    | FLAG_TENTING_BOTTOM
+    | FLAG_TESTPOINT_FAB_TOP
+    | FLAG_TESTPOINT_FAB_BOTTOM
+    | FLAG_KEEPOUT;
 
 impl PrimitiveFlags {
     pub fn decode(bits: u16) -> Self {
@@ -31,6 +62,11 @@ impl PrimitiveFlags {
             is_tenting_top: (bits & FLAG_TENTING_TOP) != 0,
             is_tenting_bottom: (bits & FLAG_TENTING_BOTTOM) != 0,
             is_keepout: (bits & FLAG_KEEPOUT) != 0,
+            is_polygon_outline: (bits & FLAG_POLYGON_OUTLINE) != 0,
+            is_teardrop: (bits & FLAG_TEARDROP) != 0,
+            is_testpoint_fab_top: (bits & FLAG_TESTPOINT_FAB_TOP) != 0,
+            is_testpoint_fab_bottom: (bits & FLAG_TESTPOINT_FAB_BOTTOM) != 0,
+            extra: bits & !KNOWN_FLAGS,
         }
     }
 
@@ -48,7 +84,19 @@ impl PrimitiveFlags {
         if self.is_keepout {
             bits |= FLAG_KEEPOUT;
         }
-        bits
+        if self.is_polygon_outline {
+            bits |= FLAG_POLYGON_OUTLINE;
+        }
+        if self.is_teardrop {
+            bits |= FLAG_TEARDROP;
+        }
+        if self.is_testpoint_fab_top {
+            bits |= FLAG_TESTPOINT_FAB_TOP;
+        }
+        if self.is_testpoint_fab_bottom {
+            bits |= FLAG_TESTPOINT_FAB_BOTTOM;
+        }
+        bits | (self.extra & !KNOWN_FLAGS)
     }
 }
 
@@ -350,6 +398,7 @@ mod tests {
                 is_tenting_top: t_top,
                 is_tenting_bottom: t_bot,
                 is_keepout: keepout,
+                ..PrimitiveFlags::default()
             };
             let bits = f.encode();
             let decoded = PrimitiveFlags::decode(bits);

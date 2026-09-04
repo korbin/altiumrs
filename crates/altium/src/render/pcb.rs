@@ -348,8 +348,11 @@ fn draw_text<C: RenderContext>(ctx: &mut C, t: &CoordTransform, text: &Text) {
     let mut style = TextStyle {
         bold: text.font_bold,
         italic: text.font_italic,
-        h_anchor: justification_to_h(text.justification),
-        v_anchor: justification_to_v(text.justification),
+        // Altium stores `location` as the bottom-left of the text's bounding
+        // box regardless of `justification` (which only governs how the text
+        // re-anchors when its string changes), so always draw from there.
+        h_anchor: justification_to_h(crate::enums::TextJustification::BottomLeft),
+        v_anchor: justification_to_v(crate::enums::TextJustification::BottomLeft),
         rotation: if text.is_mirrored {
             -text.rotation
         } else {

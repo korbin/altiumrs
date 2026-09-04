@@ -82,7 +82,13 @@ impl<'a> Iterator for Parameters<'a> {
             };
             self.remaining = rest;
 
-            let entry = entry.trim_end_matches(['\r', '\n', ' ', '\t']);
+            // Only the tail of the whole record is trimmed: Altium writes
+            // values such as `FR-4\r` mid-record and reads them back verbatim.
+            let entry = if rest.is_empty() {
+                entry.trim_end_matches(['\r', '\n', ' ', '\t'])
+            } else {
+                entry
+            };
             if entry.is_empty() {
                 continue;
             }
@@ -108,6 +114,14 @@ impl<'a> Iterator for Parameters<'a> {
             });
         }
     }
+}
+
+fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
+    let mut end = bytes.len();
+    while end > 0 && matches!(bytes[end - 1], b'\r' | b'\n' | b' ' | b'\t') {
+        end -= 1;
+    }
+    &bytes[..end]
 }
 
 fn strip_utf8_prefix(name: &str) -> (&str, bool) {
@@ -153,7 +167,9 @@ impl<'de> serde::Deserialize<'de> for ParameterMap {
         let entries = Vec::<(String, String, bool)>::deserialize(d)?;
         let mut map = ParameterMap::default();
         for (name, value, is_utf8) in entries {
-            map.index.insert(name.to_uppercase(), map.entries.len());
+            map.index
+                .entry(name.to_uppercase())
+                .or_insert(map.entries.len());
             map.entries.push(Entry {
                 name,
                 value,
@@ -180,9 +196,69 @@ impl ParameterMap {
         let mut map = Self::new();
         let iter = Parameters { remaining: s, sep };
         for entry in iter {
-            map.insert_with_utf8_flag(entry.name, entry.value, entry.is_utf8);
+            map.insert_parsed(entry.name, entry.value, entry.is_utf8);
         }
         map
+    }
+
+    /// Parse a raw parameter record straight from its bytes.
+    ///
+    /// Altium stores every value that contains non-ASCII text twice: a
+    /// `%UTF8%`-prefixed UTF-8 copy, then two empty entries, then a plain
+    /// twin under the bare key. Decoding the whole record as Windows-1252
+    /// first would turn the UTF-8 copy into mojibake, so each value is decoded
+    /// according to its own key and the UTF-8 copy wins over the twin.
+    pub fn parse_bytes(bytes: &[u8], sep: u8) -> Self {
+        let mut map = Self::new();
+        let chunks: Vec<&[u8]> = bytes.split(|&b| b == sep).collect();
+        for (i, raw) in chunks.iter().enumerate() {
+            // Only the tail of the whole record is trimmed (see `Parameters`).
+            let entry = if i + 1 == chunks.len() {
+                trim_ascii_end(raw)
+            } else {
+                raw
+            };
+            if entry.is_empty() {
+                continue;
+            }
+            let Some(eq) = entry.iter().position(|&b| b == b'=') else {
+                // Stray name-only token; keep it like the string parser does.
+                map.insert_parsed("", &crate::encoding::decode(entry), false);
+                continue;
+            };
+            let key = crate::encoding::decode(&entry[..eq]);
+            let (name, is_utf8) = strip_utf8_prefix(&key);
+            let value = if is_utf8 {
+                String::from_utf8_lossy(&entry[eq + 1..]).into_owned()
+            } else {
+                crate::encoding::decode(&entry[eq + 1..])
+            };
+            map.insert_parsed(name, &value, is_utf8);
+        }
+        map
+    }
+
+    /// Insert an entry read from a file. A plain twin never overrides a
+    /// `%UTF8%` copy that was already seen for the same name.
+    fn insert_parsed(&mut self, name: &str, value: &str, is_utf8: bool) {
+        let key = name.to_ascii_uppercase();
+        if let Some(&pos) = self.index.get(&key) {
+            if self.entries[pos].is_utf8 && !is_utf8 {
+                return;
+            }
+            // `RECORD` marks the start of a sub-record; Altium repeats it
+            // inside one string (a `Board` record restarts it every few
+            // layers). Every marker stays in place; lookups see the first.
+            if key == "RECORD" {
+                self.entries.push(Entry {
+                    name: name.to_string(),
+                    value: value.to_string(),
+                    is_utf8,
+                });
+                return;
+            }
+        }
+        self.insert_with_utf8_flag(name, value, is_utf8);
     }
 
     /// Number of entries.
@@ -223,15 +299,14 @@ impl ParameterMap {
     }
 
     /// Insert or replace an entry. New entries take the next position; updates
-    /// keep their original position. The `%UTF8%` flag is auto-set when the
-    /// value contains characters outside the Windows-1252 repertoire (which
-    /// would otherwise be lossy-encoded as numeric character references) —
-    /// note that Win-1252 covers a few codepoints above `U+00FF` (€, smart
-    /// quotes, …) and those do *not* trigger UTF-8 promotion, matching what
-    /// real Altium emits.
+    /// keep their original position. The `%UTF8%` flag is auto-set for any
+    /// value containing non-ASCII text: that is what Altium itself does (a
+    /// `-55°C` value is stored as `%UTF8%Text=` even though `°` fits in
+    /// Windows-1252), and it keeps the legacy code-page twin from ever being
+    /// the only copy of a character that some other locale would misread.
     pub fn insert(&mut self, name: &str, value: impl Into<String>) {
         let value = value.into();
-        let is_utf8 = !crate::encoding::fits_in_win1252(&value);
+        let is_utf8 = !value.is_ascii();
         self.insert_with_utf8_flag(name, &value, is_utf8);
     }
 
@@ -355,7 +430,8 @@ pub fn write_block_into(buf: &mut String, map: &ParameterMap, sep: char) {
 }
 
 /// Render a parameter map directly to bytes, choosing the encoding per entry:
-/// `%UTF8%`-flagged values are emitted as raw UTF-8, everything else goes
+/// `%UTF8%`-flagged values are emitted as a UTF-8 copy plus the plain twin
+/// Altium expects (see [`ParameterMap::parse_bytes`]), everything else goes
 /// through Windows-1252 (with `&#NNNN;` numeric-reference fallback for any
 /// stray non-Latin-1 chars). This is the byte-correct path for property
 /// blocks that mix latin-1 keys with international values.
@@ -365,8 +441,17 @@ pub fn write_block_bytes(buf: &mut Vec<u8>, map: &ParameterMap, sep: char) {
     for entry in &map.entries {
         buf.extend_from_slice(sep_bytes);
         if entry.is_utf8 {
+            // Altium's layout: the UTF-8 copy, two empty entries, then a plain
+            // twin carrying the same bytes under the bare key.
+            let name = crate::encoding::encode(&entry.name);
             buf.extend_from_slice(UTF8_PREFIX.as_bytes());
-            buf.extend_from_slice(&crate::encoding::encode(&entry.name));
+            buf.extend_from_slice(&name);
+            buf.push(b'=');
+            buf.extend_from_slice(entry.value.as_bytes());
+            for _ in 0..3 {
+                buf.extend_from_slice(sep_bytes);
+            }
+            buf.extend_from_slice(&name);
             buf.push(b'=');
             buf.extend_from_slice(entry.value.as_bytes());
         } else {
@@ -436,20 +521,50 @@ mod tests {
     }
 
     #[test]
-    fn insert_promotes_only_truly_non_win1252_chars_to_utf8() {
+    fn insert_promotes_any_non_ascii_value_to_utf8() {
         let mut map = ParameterMap::new();
-        // `€`, smart quotes, and Latin-1 are all Win-1252 — must NOT trigger
-        // UTF-8 promotion (otherwise we'd diverge from real Altium output).
+        map.insert("ASCII", "plain text");
+        // Altium promotes every non-ASCII value, even ones that fit Win-1252:
+        // a `-55°C` parameter is stored as `%UTF8%Text=` in real libraries.
         map.insert("EURO", "Costs €5");
         map.insert("LATIN1", "Café résumé");
-        map.insert("SMART_QUOTES", "\u{201C}hello\u{201D}");
-        // `Ω` is genuinely outside Win-1252 — must trigger UTF-8.
         map.insert("OMEGA", "value Ω");
 
-        assert!(!map.is_utf8("EURO"), "€ is in Win-1252, no %UTF8% needed");
-        assert!(!map.is_utf8("LATIN1"));
-        assert!(!map.is_utf8("SMART_QUOTES"));
+        assert!(!map.is_utf8("ASCII"));
+        assert!(map.is_utf8("EURO"));
+        assert!(map.is_utf8("LATIN1"));
         assert!(map.is_utf8("OMEGA"));
+    }
+
+    #[test]
+    fn parse_bytes_prefers_utf8_copy_over_plain_twin() {
+        let raw = b"|RECORD=41|%UTF8%Text=-55\xc2\xb0C|||Text=-55\xb0C|Name=Temp";
+        let map = ParameterMap::parse_bytes(raw, b'|');
+        assert_eq!(map.get("Text"), Some("-55°C"));
+        assert!(map.is_utf8("Text"));
+        assert_eq!(map.get("Name"), Some("Temp"));
+        assert_eq!(map.len(), 3);
+
+        // Plain-only legacy values still decode as Windows-1252.
+        let plain = ParameterMap::parse_bytes(b"|Text=22\xb5F", b'|');
+        assert_eq!(plain.get("Text"), Some("22µF"));
+        assert!(!plain.is_utf8("Text"));
+    }
+
+    #[test]
+    fn write_block_bytes_emits_utf8_copy_and_plain_twin() {
+        let mut map = ParameterMap::new();
+        map.insert("RECORD", "41");
+        map.insert("Text", "100Ω");
+        let mut out = Vec::new();
+        write_block_bytes(&mut out, &map, '|');
+        assert_eq!(
+            out,
+            b"|RECORD=41|%UTF8%Text=100\xce\xa9|||Text=100\xce\xa9".to_vec()
+        );
+        let back = ParameterMap::parse_bytes(&out, b'|');
+        assert_eq!(back.get("Text"), Some("100Ω"));
+        assert_eq!(back.len(), 2);
     }
 
     #[test]

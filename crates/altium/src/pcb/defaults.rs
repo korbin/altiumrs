@@ -5,8 +5,6 @@
 //! callers who want a different stackup can populate `library_parameters`
 //! themselves and that gets written verbatim.
 
-use std::collections::BTreeMap;
-
 use crate::parameter::ParameterMap;
 
 /// Append a 2-layer master stack to `params`, mirroring what the Altium editor
@@ -143,16 +141,19 @@ pub(crate) fn populate_default_pcblib_parameters(
 /// missing. Used by the writer so a partially-populated `library_parameters`
 /// still gets the load-bearing V9 stack entries.
 pub(crate) fn ensure_pcblib_parameters_complete(
-    user: &BTreeMap<String, String>,
+    user: &ParameterMap,
     component_count: usize,
     out: &mut ParameterMap,
 ) {
-    for (k, v) in user {
-        out.insert(k, v.clone());
-    }
+    *out = user.clone();
     let mut defaults = ParameterMap::new();
     populate_default_pcblib_parameters(&mut defaults, component_count);
     for (name, value, _is_utf8) in defaults.iter() {
+        // HEADER and WEIGHT are this crate's additions; a record that came
+        // from Altium does not carry them and must not gain them.
+        if matches!(name, "HEADER" | "WEIGHT") {
+            continue;
+        }
         if !out.contains_key(name) {
             out.insert(name, value.to_string());
         }
@@ -485,9 +486,9 @@ mod tests {
 
     #[test]
     fn ensure_complete_only_fills_missing() {
-        let mut user = BTreeMap::new();
-        user.insert("HEADER".to_string(), "Custom".to_string());
-        user.insert("KIND".to_string(), "MyKind".to_string());
+        let mut user = ParameterMap::new();
+        user.insert("HEADER", "Custom");
+        user.insert("KIND", "MyKind");
 
         let mut out = ParameterMap::new();
         ensure_pcblib_parameters_complete(&user, 0, &mut out);

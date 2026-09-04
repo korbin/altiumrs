@@ -1,6 +1,11 @@
 //! Geometric primitives that live on a PCB: pads, tracks, vias, arcs, text,
 //! fills, regions, and 3D component bodies.
 
+/// Flag bits Altium sets on every primitive it creates (bit 3); see `binary::FLAG_ALTIUM_NATIVE`.
+fn default_flags_extra() -> u16 {
+    super::binary::FLAG_ALTIUM_NATIVE
+}
+
 use std::collections::BTreeMap;
 
 #[cfg(feature = "serde")]
@@ -28,6 +33,12 @@ pub struct Track {
     pub enabled: bool,
     pub is_locked: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// Outline segment of a polygon pour (flag bit 1).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_polygon_outline: bool,
     pub polygon_outline: bool,
 
     pub is_free_primitive: bool,
@@ -61,7 +72,11 @@ pub struct Track {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
 }
@@ -84,6 +99,8 @@ impl Default for Track {
             enabled: true,
             is_locked: false,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            is_polygon_outline: false,
             polygon_outline: false,
             is_free_primitive: false,
             is_electrical_prim: false,
@@ -145,6 +162,12 @@ pub struct Arc {
     pub enabled: bool,
     pub is_locked: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// Outline segment of a polygon pour (flag bit 1).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_polygon_outline: bool,
     pub polygon_outline: bool,
 
     pub is_free_primitive: bool,
@@ -178,7 +201,11 @@ pub struct Arc {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
 }
@@ -201,6 +228,8 @@ impl Default for Arc {
             enabled: true,
             is_locked: false,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            is_polygon_outline: false,
             polygon_outline: false,
             is_free_primitive: false,
             is_electrical_prim: false,
@@ -310,6 +339,15 @@ pub struct Pad {
     pub enabled: bool,
     pub is_locked: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// Fabrication test point, top side (flag bit 7).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_testpoint_fab_top: bool,
+    /// Fabrication test point, bottom side (flag bit 8).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_testpoint_fab_bottom: bool,
     pub is_hidden: bool,
     pub is_test_point_top: bool,
     pub is_test_point_bottom: bool,
@@ -395,13 +433,21 @@ pub struct Pad {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
     /// Original size/shape block bytes (see `raw_record`).
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_size_shape: Option<Vec<u8>>,
 }
@@ -461,6 +507,9 @@ impl Default for Pad {
             enabled: true,
             is_locked: false,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            is_testpoint_fab_top: false,
+            is_testpoint_fab_bottom: false,
             is_hidden: false,
             is_test_point_top: false,
             is_test_point_bottom: false,
@@ -560,6 +609,15 @@ pub struct Via {
     pub enabled: bool,
     pub is_locked: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// Fabrication test point, top side (flag bit 7).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_testpoint_fab_top: bool,
+    /// Fabrication test point, bottom side (flag bit 8).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_testpoint_fab_bottom: bool,
     pub mode: i32,
     pub height: Coord,
     pub is_plated: bool,
@@ -609,7 +667,11 @@ pub struct Via {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
 }
@@ -640,6 +702,9 @@ impl Default for Via {
             enabled: true,
             is_locked: false,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            is_testpoint_fab_top: false,
+            is_testpoint_fab_bottom: false,
             mode: 0,
             height: Coord::ZERO,
             is_plated: true,
@@ -700,6 +765,9 @@ pub struct Fill {
     pub union_index: i32,
     pub enabled: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
     pub is_free_primitive: bool,
     pub is_electrical_prim: bool,
     pub is_pre_route: bool,
@@ -730,7 +798,11 @@ pub struct Fill {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
 }
@@ -751,6 +823,7 @@ impl Default for Fill {
             union_index: 0,
             enabled: true,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
             is_free_primitive: false,
             is_electrical_prim: false,
             is_pre_route: false,
@@ -814,6 +887,12 @@ pub struct Region {
     pub is_locked: bool,
     pub enabled: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// The region is a teardrop (flag bit 4).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_teardrop: bool,
     pub cavity_height: Coord,
     pub user_routed: bool,
     pub union_index: i32,
@@ -864,7 +943,11 @@ pub struct Region {
     /// writer patches the typed fields above into this buffer when present.
     #[cfg_attr(
         feature = "serde",
-        serde(default, with = "crate::serde_bytes::b64_opt", skip_serializing_if = "Option::is_none")
+        serde(
+            default,
+            with = "crate::serde_bytes::b64_opt",
+            skip_serializing_if = "Option::is_none"
+        )
     )]
     pub raw_record: Option<Vec<u8>>,
 }
@@ -884,6 +967,8 @@ impl Default for Region {
             is_locked: false,
             enabled: true,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            is_teardrop: false,
             cavity_height: Coord::ZERO,
             user_routed: false,
             union_index: 0,
@@ -993,6 +1078,14 @@ pub struct Text {
 
     pub is_locked: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
+    /// V7 layer id written in the record tail when it cannot be derived from
+    /// `layer` (mechanical layers 17..32, whose layer byte Altium clamps to
+    /// Mechanical 16). Zero means "derive from `layer`".
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub layer_v7: u32,
     pub size: Coord,
     pub width: Coord,
     pub multiline_text_height: Coord,
@@ -1049,6 +1142,18 @@ pub struct Text {
     pub mirrored: bool,
     pub is_comment: bool,
     pub is_designator: bool,
+    /// "Frame" option (text record offset 230).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_frame: bool,
+    /// "Offset border" option (text record offset 231).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub is_offset_border: bool,
+    /// Whether Altium honours [`Self::justification`] (record offset 240).
+    /// Altium stores `location` as the bottom-left of the text's bounding
+    /// box regardless; the justification only governs how the text
+    /// re-anchors when its string changes (e.g. `.Designator` resolving).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub justification_valid: bool,
     pub inverted: bool,
     pub inverted_tt_text_border: Coord,
     pub inv_rect_height: Coord,
@@ -1094,15 +1199,17 @@ impl Default for Text {
             barcode_tb_margin: Coord::ZERO,
             bar_code_kind: 0,
             bar_code_bit_pattern: None,
-            bar_code_full_height: Coord::ZERO,
-            bar_code_full_width: Coord::ZERO,
+            // Barcode block defaults mirror the bytes Altium writes for
+            // ordinary (non-barcode) text records.
+            bar_code_full_height: Coord::from_raw(2_100_000),
+            bar_code_full_width: Coord::from_raw(10_500_000),
             bar_code_min_width: Coord::ZERO,
-            bar_code_show_text: false,
-            bar_code_inverted: false,
-            bar_code_render_mode: 0,
-            bar_code_font_name: None,
-            bar_code_x_margin: Coord::ZERO,
-            bar_code_y_margin: Coord::ZERO,
+            bar_code_show_text: true,
+            bar_code_inverted: true,
+            bar_code_render_mode: 1,
+            bar_code_font_name: Some("Arial".into()),
+            bar_code_x_margin: Coord::from_raw(200_000),
+            bar_code_y_margin: Coord::from_raw(200_000),
             font_id: 0,
             use_tt_fonts: false,
             multi_line: false,
@@ -1110,6 +1217,8 @@ impl Default for Text {
             mirror_flag: false,
             is_locked: false,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
+            layer_v7: 0,
             size: Coord::ZERO,
             width: Coord::ZERO,
             multiline_text_height: Coord::ZERO,
@@ -1161,6 +1270,9 @@ impl Default for Text {
             mirrored: false,
             is_comment: false,
             is_designator: false,
+            is_frame: false,
+            is_offset_border: false,
+            justification_valid: false,
             inverted: false,
             inverted_tt_text_border: Coord::ZERO,
             inv_rect_height: Coord::ZERO,
@@ -1222,11 +1334,17 @@ pub struct ComponentBody {
     pub model_name: Option<String>,
     pub model_checksum: i32,
     pub model_source: Option<String>,
-    #[cfg_attr(feature = "serde", serde(default, with = "crate::serde_bytes::b64_opt"))]
+    #[cfg_attr(
+        feature = "serde",
+        serde(default, with = "crate::serde_bytes::b64_opt")
+    )]
     pub step_model_data: Option<Vec<u8>>,
 
     pub enabled: bool,
     pub is_keepout: bool,
+    /// Unmodelled flag bits from the record header, preserved verbatim.
+    #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
+    pub flags_extra: u16,
     pub cavity_height: Coord,
     pub unique_id: Option<String>,
     pub user_routed: bool,
@@ -1307,6 +1425,7 @@ impl Default for ComponentBody {
             step_model_data: None,
             enabled: true,
             is_keepout: false,
+            flags_extra: default_flags_extra(),
             cavity_height: Coord::ZERO,
             unique_id: None,
             user_routed: false,

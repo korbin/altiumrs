@@ -10,8 +10,7 @@ use tokio::io::AsyncWrite;
 
 use super::binary::{
     PrimitiveFlags, layer_byte_to_name, layer_name_to_byte, patch_common_prefix, patch_f64,
-    patch_i32, patch_point, patch_u8,
-    write_common_prefix_full, write_coord_point,
+    patch_i32, patch_point, patch_u8, write_common_prefix_full, write_coord_point,
 };
 use super::component::Component;
 use super::document::Document;
@@ -109,7 +108,7 @@ fn write_section_keys_stream(
     library: &Library,
     section_keys: &BTreeMap<String, String>,
 ) -> Result<()> {
-    let needs: Vec<&Component> = library
+    let mut needs: Vec<&Component> = library
         .components
         .iter()
         .filter(|c| section_keys.contains_key(&c.name))
@@ -117,6 +116,16 @@ fn write_section_keys_stream(
     if needs.is_empty() {
         return Ok(());
     }
+    // Altium's stream order is its own insertion order; replay the order the
+    // file had for the names it covers, then anything new in component order.
+    let rank = |name: &str| {
+        library
+            .section_key_order
+            .iter()
+            .position(|n| n == name)
+            .unwrap_or(usize::MAX)
+    };
+    needs.sort_by_key(|c| rank(&c.name));
 
     let mut buf = Cursor::new(Vec::<u8>::new());
     let mut bw = BinaryWriter::new(&mut buf);
@@ -150,7 +159,14 @@ fn write_library_storage(
     }
     write_library_models(cf, library)?;
     write_default_library_stubs(cf, library)?;
-    write_additional_streams(cf, "Library", &library.additional_library_streams)?;
+    // Drop a TOC carried in from an older export; it is regenerated above.
+    let extra: BTreeMap<String, Vec<u8>> = library
+        .additional_library_streams
+        .iter()
+        .filter(|(k, _)| !k.starts_with("ComponentParamsTOC/"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    write_additional_streams(cf, "Library", &extra)?;
     Ok(())
 }
 
@@ -175,8 +191,8 @@ fn write_library_data(cf: &mut CompoundFile, library: &Library) -> Result<()> {
         );
     } else {
         super::defaults::populate_default_pcblib_parameters(&mut params, library.components.len());
+        params.insert("WEIGHT", library.components.len().to_string());
     }
-    params.insert("WEIGHT", library.components.len().to_string());
     write_c_string_param_block(&mut bw, &params)?;
 
     bw.write_u32(library.components.len() as u32)?;
@@ -214,7 +230,17 @@ fn write_default_footprint_stubs(
     component: &Component,
     section_key: &str,
 ) -> Result<()> {
+    // A footprint read from disk carries its own `PrimitiveGuids`; Altium does
+    // not always give such a footprint a `UniqueIDPrimitiveInformation`
+    // storage, so only a from-scratch footprint gets that stub.
+    let from_disk = component
+        .additional_streams
+        .keys()
+        .any(|k| k.starts_with("PrimitiveGuids/"));
     for sub in ["PrimitiveGuids", "UniqueIDPrimitiveInformation"] {
+        if from_disk && sub == "UniqueIDPrimitiveInformation" {
+            continue;
+        }
         let header_path = format!("{section_key}/{sub}/Header");
         let data_path = format!("{section_key}/{sub}/Data");
         if !component
@@ -242,19 +268,37 @@ fn write_footprint_parameters(
     let mut bw = BinaryWriter::new(&mut buf);
 
     let mut params = ParameterMap::new();
-    for (k, v) in &component.additional_parameters {
-        params.insert(k, v.clone());
-    }
     params.insert("PATTERN", component.name.clone());
-    params.insert("HEIGHT", component.height.to_raw().to_string());
+    // Altium writes HEIGHT as a mil string ("31.4961mil"); a bare integer
+    // is not read back as internal units.
+    params.insert(
+        "HEIGHT",
+        super::doc_codec::format_mil_coord(component.height),
+    );
     if let Some(d) = &component.description {
         params.insert("DESCRIPTION", d.clone());
+    }
+    // Altium's key order: PATTERN, HEIGHT, DESCRIPTION, GRIDSNGUIDE, ITEMGUID,
+    // REVISIONGUID, COMPONENTKIND, AREA, then anything else.
+    let extra = &component.additional_parameters;
+    if let Some(v) = extra.get("GRIDSNGUIDE") {
+        params.insert("GRIDSNGUIDE", v.clone());
     }
     if let Some(g) = &component.item_guid {
         params.insert("ITEMGUID", g.clone());
     }
     if let Some(g) = &component.item_revision_guid {
         params.insert("REVISIONGUID", g.clone());
+    }
+    for key in ["COMPONENTKIND", "AREA"] {
+        if let Some(v) = extra.get(key) {
+            params.insert(key, v.clone());
+        }
+    }
+    for (k, v) in extra {
+        if !params.contains_key(k) {
+            params.insert(k, v.clone());
+        }
     }
     write_c_string_param_block(&mut bw, &params)?;
 
@@ -294,37 +338,53 @@ fn write_footprint_data(
 
     bw.write_pascal_string_block(&component.name)?;
 
-    for arc in &component.arcs {
-        bw.write_u8(1)?;
-        write_arc(&mut bw, arc)?;
-    }
-    for pad in &component.pads {
-        bw.write_u8(2)?;
-        write_pad(&mut bw, pad)?;
-    }
-    for via in &component.vias {
-        bw.write_u8(3)?;
-        write_via(&mut bw, via)?;
-    }
-    for track in &component.tracks {
-        bw.write_u8(4)?;
-        write_track(&mut bw, track)?;
-    }
-    for (i, text) in component.texts.iter().enumerate() {
-        bw.write_u8(5)?;
-        write_text(&mut bw, text, i as i32)?;
-    }
-    for fill in &component.fills {
-        bw.write_u8(6)?;
-        write_fill(&mut bw, fill)?;
-    }
-    for region in &component.regions {
-        bw.write_u8(11)?;
-        write_region(&mut bw, region)?;
-    }
-    for body in &component.component_bodies {
-        bw.write_u8(12)?;
-        write_component_body(&mut bw, body)?;
+    let counts = [
+        component.arcs.len(),
+        component.pads.len(),
+        component.vias.len(),
+        component.tracks.len(),
+        component.texts.len(),
+        component.fills.len(),
+        component.regions.len(),
+        component.component_bodies.len(),
+    ];
+    let ids = [1u8, 2, 3, 4, 5, 6, 11, 12];
+    // Replay the source file's interleaving when it is still consistent with
+    // the primitive lists; otherwise fall back to grouped-by-kind order.
+    let order: Vec<u8> = if !component.primitive_order.is_empty()
+        && ids.iter().zip(counts).all(|(id, n)| {
+            component
+                .primitive_order
+                .iter()
+                .filter(|x| *x == id)
+                .count()
+                == n
+        })
+        && component.primitive_order.iter().all(|x| ids.contains(x))
+    {
+        component.primitive_order.clone()
+    } else {
+        ids.iter()
+            .zip(counts)
+            .flat_map(|(id, n)| std::iter::repeat(*id).take(n))
+            .collect()
+    };
+    let mut next = [0usize; 8];
+    for id in order {
+        let slot = ids.iter().position(|x| *x == id).unwrap();
+        let i = next[slot];
+        next[slot] += 1;
+        bw.write_u8(id)?;
+        match id {
+            1 => write_arc(&mut bw, &component.arcs[i])?,
+            2 => write_pad(&mut bw, &component.pads[i])?,
+            3 => write_via(&mut bw, &component.vias[i])?,
+            4 => write_track(&mut bw, &component.tracks[i])?,
+            5 => write_text(&mut bw, &component.texts[i], i as i32)?,
+            6 => write_fill(&mut bw, &component.fills[i])?,
+            11 => write_region(&mut bw, &component.regions[i])?,
+            _ => write_component_body(&mut bw, &component.component_bodies[i])?,
+        }
     }
 
     cf.write_stream(format!("{section_key}/Data"), &buf.into_inner())?;
@@ -337,8 +397,10 @@ fn write_library_models(cf: &mut CompoundFile, library: &Library) -> Result<()> 
 
     let mut data = Vec::<u8>::new();
     for model in &library.models {
+        // Altium puts an unnamed model's empty NAME first instead of last.
         let param_str = format!(
-            "EMBED={}|MODELSOURCE={}|ID={}|ROTX={:.3}|ROTY={:.3}|ROTZ={:.3}|DZ={}|CHECKSUM={}|NAME={}",
+            "{}EMBED={}|MODELSOURCE={}|ID={}|ROTX={:.3}|ROTY={:.3}|ROTZ={:.3}|DZ={}|CHECKSUM={}{}",
+            if model.name.is_empty() { "|NAME=|" } else { "" },
             if model.is_embedded { "TRUE" } else { "FALSE" },
             model.model_source,
             format_model_id(&model.id),
@@ -347,7 +409,11 @@ fn write_library_models(cf: &mut CompoundFile, library: &Library) -> Result<()> 
             model.rotation_z,
             model.dz,
             model.checksum,
-            model.name,
+            if model.name.is_empty() {
+                String::new()
+            } else {
+                format!("|NAME={}", model.name)
+            },
         );
         let mut bytes = encoding::encode(&param_str);
         bytes.push(0);
@@ -361,8 +427,14 @@ fn write_library_models(cf: &mut CompoundFile, library: &Library) -> Result<()> 
         let payload = if model.step_data.is_empty() {
             Vec::new()
         } else {
-            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::best());
-            encoder.write_all(model.step_data.as_bytes())?;
+            let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+            if model.step_data_is_latin1 {
+                // One char per original byte (see `Model3d::step_data_is_latin1`).
+                let bytes: Vec<u8> = model.step_data.chars().map(|c| c as u8).collect();
+                encoder.write_all(&bytes)?;
+            } else {
+                encoder.write_all(model.step_data.as_bytes())?;
+            }
             encoder.finish()?
         };
         cf.write_stream(format!("Library/Models/{i}"), &payload)?;
@@ -430,41 +502,42 @@ fn write_default_library_stubs(cf: &mut CompoundFile, library: &Library) -> Resu
     if !contains_library_stream(library, "Textures/Data") {
         cf.write_stream("Library/Textures/Data", &[])?;
     }
-    if !contains_library_stream(library, "ComponentParamsTOC/Header") {
-        cf.write_stream(
-            "Library/ComponentParamsTOC/Header",
-            &u32_le_bytes(library.components.len() as u32),
-        )?;
-    }
-    if !contains_library_stream(library, "ComponentParamsTOC/Data") {
-        cf.write_stream(
-            "Library/ComponentParamsTOC/Data",
-            &default_component_params_toc_data(library),
-        )?;
-    }
+    // Always derived from the components (a carried copy would go stale as
+    // soon as a footprint is added, removed or renamed). Altium's header is
+    // the record count, which is 1: the whole table is one block.
+    cf.write_stream("Library/ComponentParamsTOC/Header", &u32_le_bytes(1))?;
+    cf.write_stream(
+        "Library/ComponentParamsTOC/Data",
+        &default_component_params_toc_data(library),
+    )?;
     Ok(())
 }
 
+/// `Library/ComponentParamsTOC/Data` exactly as Altium writes it: one
+/// length-prefixed block holding a `Name=|Pad Count=|Height=|Description=`
+/// line per footprint (CRLF-terminated, height in mils with trailing zeros
+/// trimmed and no unit) followed by a single NUL.
 fn default_component_params_toc_data(library: &Library) -> Vec<u8> {
-    let mut data = Vec::<u8>::new();
+    let mut text = Vec::<u8>::new();
     for component in &library.components {
         let name = component.name.replace('|', "/");
         let pad_count = component.pads.len();
-        let height_mil = component.height.to_mils();
+        let height = super::doc_codec::format_mil_coord(component.height);
+        let height = height.strip_suffix("mil").unwrap_or(&height);
         let description = component
             .description
             .clone()
             .unwrap_or_default()
             .replace('|', "/");
-        let body = format!(
-            "Name={name}|Pad Count={pad_count}|Height={height_mil:.4}|Description={description}\r\n",
+        let line = format!(
+            "Name={name}|Pad Count={pad_count}|Height={height}|Description={description}\r\n",
         );
-        let mut body_bytes = body.into_bytes();
-        body_bytes.push(0); // C-string terminator
-        let len = body_bytes.len() as u32;
-        data.extend_from_slice(&len.to_le_bytes());
-        data.extend_from_slice(&body_bytes);
+        text.extend_from_slice(&encoding::encode(&line));
     }
+    text.push(0);
+    let mut data = Vec::<u8>::new();
+    data.extend_from_slice(&(text.len() as u32).to_le_bytes());
+    data.extend_from_slice(&text);
     data
 }
 
@@ -502,39 +575,171 @@ fn default_file_version_info_data() -> Vec<u8> {
     // Migration-history list ending at Release 20.0. An outdated terminal
     // entry triggers Altium's "File in Newer Format" report on every open.
     const ENTRIES: &[(&str, &str, &str)] = &[
-        ("6.3", "<b>CAUTION</b> - Via connections to both hatched and solid signal layer polygons are now controlled by the polygon connect style rule. Re-pouring polygons may result in physical copper differences.", ""),
-        ("6.6", "", "<b>CAUTION</b> - File contains Rounded Rectangular pads not supported by this version of the software. These pads have been converted to the Round shape."),
-        ("6.8", "", "<b>CAUTION</b> - File contains one or more Solid Regions containing boundary arcs. These arcs have been converted to linear segments that approximate the arc."),
-        ("6.8", "", "<b>CAUTION</b> - File contains one or more Component Bodies containing boundary arcs. These arcs have been converted to linear segments that approximate the arc."),
-        ("6.8", "", "<b>CAUTION</b> - File contains one or more Matched Length Rules. Rule atributes have been changed. Rule does not support pattern related attributes (amplitude, gap) anymore they are treated as tool attibutes instead.Rule is enhanced with subscoping attributes - allowing checking between nets in the same differential pair, between differential pairs as well as other electrical objects"),
-        ("6.8", "", "<b>CAUTION</b> - Board cutout objects introduced. Be aware that if your design contains board cutouts, they cannot be read in previous versions."),
-        ("6.8", "", "<b>CAUTION</b> - New type of text - barcode text was introduced. Be aware that if your design contains barcodes they cannot be read in previous versions."),
-        ("6.8", "", "<b>CAUTION</b> - Polygon/Layer dependent connect style rule for pads and vias was introduced. First scope should define pads/vias while 2nd scope should define polygons.Second scope is not readable in versions prior to 6.8 and is assumed to be 'All'."),
-        ("6.9", "", "<b>CAUTION</b> - File contains one or more Component Bodies containing embedded STEP models. These models have be discarded."),
-        ("6.9", "", "<b>CAUTION</b> - File contains one or more Components with pads with Pad Jumper IDs. The pads Pad Jumper ID fields have been discarded."),
-        ("7.0", "", "<b>CAUTION</b> - File may contain Component Bodies with linked STEP models. These models will be discarded."),
-        ("Winter 09", "", "<b>CAUTION</b> - Vias support varying diameters across layerstack. If this feature is used in design, extra values will be discarded."),
-        ("Winter 09", "", "<b>CAUTION</b> - File may contain pads with hole offsets. Hole offset information will be discarded."),
-        ("Winter 09", "", "<b>CAUTION</b> - File contains new manufacturing rules. Hole To Hole clearance, Minimum solder mask sliver, Silkscreen Over Exposed Copper and Silkscreen To Silkscreen Clearance rules were introduced in Altium Designer Winter 09.These rules will be discarded."),
-        ("Winter 09", "", "<b>CAUTION</b> - 3D models now support texturing.If used in design these textures will be discarded."),
-        ("Summer 09", "<b>CAUTION</b> - File contains old violation objects. These violations are no longer supported & will not be loaded. Please run DRC after opening this file in order to refresh the violations.", "<b>CAUTION</b> - File contains new custom violations that replaced the old violation objects. These violations were introduced in Altium Designer Summer 09. The new custom violations will be discarded."),
-        ("Summer 09", "", "<b>CAUTION</b> - Support was added for 32 Mechanical Layers. Objects on mechanical layers beyond 16 have been moved to Mechanical Layer 16."),
-        ("Summer 09", "<b>CAUTION</b> - Existing testpoint rules and settings are used as fabrication testpoint information.", "<b>CAUTION</b> - File contains assembly testpoint rules and/or settings.  Assembly testpoint information will be discarded."),
-        ("Release 10", "", "<b>CAUTION</b> - New Custom Grids and Guides were introduced. Be aware that your design might contain Custom Grids and Guides that cannot be read in previous versions. "),
-        ("Release 10", "", "<b>CAUTION</b> - New Structured Clusters were introduced. Be aware that your design might contain Structured Clusters that cannot be read in previous versions. "),
-        ("Release 10", "", "<b>CAUTION</b> - New PCB 3D Movie Manager was introduced. Be aware that your design might contain 3D PCB movie that cannot be read in previous versions. "),
-        ("Release 10 update 1", "", "<b>CAUTION</b> - New Clearance Rule subscopes targeting differential pairs  were introduced. Be aware that your design might contain Clearance Rules using those subscopes that cannot be read in previous versions. "),
-        ("Release 10 update 15", "", "<b>CAUTION</b> - Support of Solder Mask and Paste Mask expansions for Tracks, Arcs, Fills and Regions was introduced. Be aware that your design might contain Solder Mask and Paste Mask expansions for these types of primitives that cannot be read in the version of Altium Designer you are currently using. "),
-        ("Release 12", "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness.", "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness."),
-        ("Release 13", "<b>CAUTION</b> - Silkscreen Over Component Pads Rules are converted to Silk To Solder Mask Clearance Rules. Suggest examining rule scopes for accuracy.", "<b>CAUTION</b> - Silk To Solder Mask Clearance Rules are converted to Silkscreen Over Component Pads Rules."),
-        ("Release 14", "", "<b>CAUTION</b> - The Differential Pairs Routing rule added support for control of the width. Be aware that these widths must be manually entered as Width rules in this version."),
-        ("Release 15", "", "<b>CAUTION</b> - Support of separate solder masks for top & bottom of pads added."),
-        ("Release 15.1", "", "<b>CAUTION</b> - Support Multi-line PCB Text added."),
-        ("Release 16.0", "", "<b>CAUTION</b> - Pad/Via hole size tolerance value added."),
-        ("Release 17.0", "", "<b>CAUTION</b> - Component parameters added."),
-        ("Release 17.0", "", "<b>CAUTION</b> - Support of backdrilling"),
-        ("Release 17.1", "", "<b>CAUTION</b> - Support of waived violations"),
-        ("Release 17.1", "", "<b>CAUTION</b> - Support of object specific keepouts"),
+        (
+            "6.3",
+            "<b>CAUTION</b> - Via connections to both hatched and solid signal layer polygons are now controlled by the polygon connect style rule. Re-pouring polygons may result in physical copper differences.",
+            "",
+        ),
+        (
+            "6.6",
+            "",
+            "<b>CAUTION</b> - File contains Rounded Rectangular pads not supported by this version of the software. These pads have been converted to the Round shape.",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - File contains one or more Solid Regions containing boundary arcs. These arcs have been converted to linear segments that approximate the arc.",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - File contains one or more Component Bodies containing boundary arcs. These arcs have been converted to linear segments that approximate the arc.",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - File contains one or more Matched Length Rules. Rule atributes have been changed. Rule does not support pattern related attributes (amplitude, gap) anymore they are treated as tool attibutes instead.Rule is enhanced with subscoping attributes - allowing checking between nets in the same differential pair, between differential pairs as well as other electrical objects",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - Board cutout objects introduced. Be aware that if your design contains board cutouts, they cannot be read in previous versions.",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - New type of text - barcode text was introduced. Be aware that if your design contains barcodes they cannot be read in previous versions.",
+        ),
+        (
+            "6.8",
+            "",
+            "<b>CAUTION</b> - Polygon/Layer dependent connect style rule for pads and vias was introduced. First scope should define pads/vias while 2nd scope should define polygons.Second scope is not readable in versions prior to 6.8 and is assumed to be 'All'.",
+        ),
+        (
+            "6.9",
+            "",
+            "<b>CAUTION</b> - File contains one or more Component Bodies containing embedded STEP models. These models have be discarded.",
+        ),
+        (
+            "6.9",
+            "",
+            "<b>CAUTION</b> - File contains one or more Components with pads with Pad Jumper IDs. The pads Pad Jumper ID fields have been discarded.",
+        ),
+        (
+            "7.0",
+            "",
+            "<b>CAUTION</b> - File may contain Component Bodies with linked STEP models. These models will be discarded.",
+        ),
+        (
+            "Winter 09",
+            "",
+            "<b>CAUTION</b> - Vias support varying diameters across layerstack. If this feature is used in design, extra values will be discarded.",
+        ),
+        (
+            "Winter 09",
+            "",
+            "<b>CAUTION</b> - File may contain pads with hole offsets. Hole offset information will be discarded.",
+        ),
+        (
+            "Winter 09",
+            "",
+            "<b>CAUTION</b> - File contains new manufacturing rules. Hole To Hole clearance, Minimum solder mask sliver, Silkscreen Over Exposed Copper and Silkscreen To Silkscreen Clearance rules were introduced in Altium Designer Winter 09.These rules will be discarded.",
+        ),
+        (
+            "Winter 09",
+            "",
+            "<b>CAUTION</b> - 3D models now support texturing.If used in design these textures will be discarded.",
+        ),
+        (
+            "Summer 09",
+            "<b>CAUTION</b> - File contains old violation objects. These violations are no longer supported & will not be loaded. Please run DRC after opening this file in order to refresh the violations.",
+            "<b>CAUTION</b> - File contains new custom violations that replaced the old violation objects. These violations were introduced in Altium Designer Summer 09. The new custom violations will be discarded.",
+        ),
+        (
+            "Summer 09",
+            "",
+            "<b>CAUTION</b> - Support was added for 32 Mechanical Layers. Objects on mechanical layers beyond 16 have been moved to Mechanical Layer 16.",
+        ),
+        (
+            "Summer 09",
+            "<b>CAUTION</b> - Existing testpoint rules and settings are used as fabrication testpoint information.",
+            "<b>CAUTION</b> - File contains assembly testpoint rules and/or settings.  Assembly testpoint information will be discarded.",
+        ),
+        (
+            "Release 10",
+            "",
+            "<b>CAUTION</b> - New Custom Grids and Guides were introduced. Be aware that your design might contain Custom Grids and Guides that cannot be read in previous versions. ",
+        ),
+        (
+            "Release 10",
+            "",
+            "<b>CAUTION</b> - New Structured Clusters were introduced. Be aware that your design might contain Structured Clusters that cannot be read in previous versions. ",
+        ),
+        (
+            "Release 10",
+            "",
+            "<b>CAUTION</b> - New PCB 3D Movie Manager was introduced. Be aware that your design might contain 3D PCB movie that cannot be read in previous versions. ",
+        ),
+        (
+            "Release 10 update 1",
+            "",
+            "<b>CAUTION</b> - New Clearance Rule subscopes targeting differential pairs  were introduced. Be aware that your design might contain Clearance Rules using those subscopes that cannot be read in previous versions. ",
+        ),
+        (
+            "Release 10 update 15",
+            "",
+            "<b>CAUTION</b> - Support of Solder Mask and Paste Mask expansions for Tracks, Arcs, Fills and Regions was introduced. Be aware that your design might contain Solder Mask and Paste Mask expansions for these types of primitives that cannot be read in the version of Altium Designer you are currently using. ",
+        ),
+        (
+            "Release 12",
+            "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness.",
+            "<b>CAUTION</b> - Air Gap Width previously controlled by Clearance rule is now controlled by Polygon Connect Style rule's newly introduced Air Gap Width (set to default value). Suggest reviewing each Polygon Connect Style rule's Air Gap Width attribute for correctness.",
+        ),
+        (
+            "Release 13",
+            "<b>CAUTION</b> - Silkscreen Over Component Pads Rules are converted to Silk To Solder Mask Clearance Rules. Suggest examining rule scopes for accuracy.",
+            "<b>CAUTION</b> - Silk To Solder Mask Clearance Rules are converted to Silkscreen Over Component Pads Rules.",
+        ),
+        (
+            "Release 14",
+            "",
+            "<b>CAUTION</b> - The Differential Pairs Routing rule added support for control of the width. Be aware that these widths must be manually entered as Width rules in this version.",
+        ),
+        (
+            "Release 15",
+            "",
+            "<b>CAUTION</b> - Support of separate solder masks for top & bottom of pads added.",
+        ),
+        (
+            "Release 15.1",
+            "",
+            "<b>CAUTION</b> - Support Multi-line PCB Text added.",
+        ),
+        (
+            "Release 16.0",
+            "",
+            "<b>CAUTION</b> - Pad/Via hole size tolerance value added.",
+        ),
+        (
+            "Release 17.0",
+            "",
+            "<b>CAUTION</b> - Component parameters added.",
+        ),
+        (
+            "Release 17.0",
+            "",
+            "<b>CAUTION</b> - Support of backdrilling",
+        ),
+        (
+            "Release 17.1",
+            "",
+            "<b>CAUTION</b> - Support of waived violations",
+        ),
+        (
+            "Release 17.1",
+            "",
+            "<b>CAUTION</b> - Support of object specific keepouts",
+        ),
         ("Release 20.0", "", ""),
     ];
     fn codepoints(s: &str) -> String {
@@ -571,6 +776,51 @@ fn write_c_string_param_block<W: Write + Seek>(
     })
 }
 
+/// As [`write_c_string_param_block`] but without the leading separator —
+/// the form Altium uses for region and component-body parameter strings.
+fn write_c_string_param_block_bare<W: Write + Seek>(
+    bw: &mut BinaryWriter<W>,
+    params: &ParameterMap,
+) -> Result<()> {
+    bw.write_block(|w| {
+        let mut bytes = Vec::<u8>::new();
+        crate::parameter::write_block_bytes(&mut bytes, params, '|');
+        let start = usize::from(bytes.first() == Some(&b'|'));
+        w.write_bytes(&bytes[start..])?;
+        w.write_u8(0)?;
+        Ok(())
+    })
+}
+
+/// Component-body parameter block. Altium writes `ARCRESOLUTION` twice: once
+/// after `UNIONINDEX` and again right after `BODYPROJECTION`; a map cannot hold
+/// the duplicate, so it is spliced in here.
+fn write_body_param_block<W: Write + Seek>(
+    bw: &mut BinaryWriter<W>,
+    params: &ParameterMap,
+) -> Result<()> {
+    bw.write_block(|w| {
+        let mut bytes = Vec::<u8>::new();
+        crate::parameter::write_block_bytes(&mut bytes, params, '|');
+        let start = usize::from(bytes.first() == Some(&b'|'));
+        let mut body = bytes[start..].to_vec();
+        if let Some(res) = params.get("ARCRESOLUTION") {
+            let key = b"|BODYPROJECTION=";
+            if let Some(pos) = body.windows(key.len()).position(|w| w == key) {
+                let end = body[pos + 1..]
+                    .iter()
+                    .position(|&b| b == b'|')
+                    .map_or(body.len(), |i| pos + 1 + i);
+                let dup = format!("|ARCRESOLUTION={res}");
+                body.splice(end..end, dup.bytes());
+            }
+        }
+        w.write_bytes(&body)?;
+        w.write_u8(0)?;
+        Ok(())
+    })
+}
+
 // Primitive writers
 
 fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()> {
@@ -584,6 +834,9 @@ fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()>
                 is_tenting_top: arc.is_tenting_top,
                 is_tenting_bottom: arc.is_tenting_bottom,
                 is_keepout: arc.is_keepout,
+                extra: arc.flags_extra,
+                is_polygon_outline: arc.is_polygon_outline,
+                ..PrimitiveFlags::default()
             },
             arc.net_index as i32,
             arc.component_index,
@@ -604,6 +857,9 @@ fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()>
             is_tenting_top: arc.is_tenting_top,
             is_tenting_bottom: arc.is_tenting_bottom,
             is_keepout: arc.is_keepout,
+            extra: arc.flags_extra,
+            is_polygon_outline: arc.is_polygon_outline,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -648,6 +904,10 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
                 is_tenting_top: pad.is_tenting_top,
                 is_tenting_bottom: pad.is_tenting_bottom,
                 is_keepout: pad.is_keepout,
+                extra: pad.flags_extra,
+                is_testpoint_fab_top: pad.is_testpoint_fab_top,
+                is_testpoint_fab_bottom: pad.is_testpoint_fab_bottom,
+                ..PrimitiveFlags::default()
             },
             pad.net_index as i32,
             pad.component_index,
@@ -680,6 +940,10 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
             is_tenting_top: pad.is_tenting_top,
             is_tenting_bottom: pad.is_tenting_bottom,
             is_keepout: pad.is_keepout,
+            extra: pad.flags_extra,
+            is_testpoint_fab_top: pad.is_testpoint_fab_top,
+            is_testpoint_fab_bottom: pad.is_testpoint_fab_bottom,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -782,6 +1046,10 @@ fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()>
                 is_tenting_top: via.is_tenting_top,
                 is_tenting_bottom: via.is_tenting_bottom,
                 is_keepout: via.is_keepout,
+                extra: via.flags_extra,
+                is_testpoint_fab_top: via.is_testpoint_fab_top,
+                is_testpoint_fab_bottom: via.is_testpoint_fab_bottom,
+                ..PrimitiveFlags::default()
             },
             via.net_index as i32,
             via.component_index,
@@ -806,6 +1074,10 @@ fn write_via<W: Write + Seek>(bw: &mut BinaryWriter<W>, via: &Via) -> Result<()>
             is_tenting_top: via.is_tenting_top,
             is_tenting_bottom: via.is_tenting_bottom,
             is_keepout: via.is_keepout,
+            extra: via.flags_extra,
+            is_testpoint_fab_top: via.is_testpoint_fab_top,
+            is_testpoint_fab_bottom: via.is_testpoint_fab_bottom,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -863,6 +1135,9 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
                 is_tenting_top: track.is_tenting_top,
                 is_tenting_bottom: track.is_tenting_bottom,
                 is_keepout: track.is_keepout,
+                extra: track.flags_extra,
+                is_polygon_outline: track.is_polygon_outline,
+                ..PrimitiveFlags::default()
             },
             track.net_index as i32,
             track.component_index,
@@ -881,6 +1156,9 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
             is_tenting_top: track.is_tenting_top,
             is_tenting_bottom: track.is_tenting_bottom,
             is_keepout: track.is_keepout,
+            extra: track.flags_extra,
+            is_polygon_outline: track.is_polygon_outline,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -913,6 +1191,8 @@ fn write_text<W: Write + Seek>(
             is_tenting_top: text.is_tenting_top,
             is_tenting_bottom: text.is_tenting_bottom,
             is_keepout: text.is_keepout,
+            extra: text.flags_extra,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -929,28 +1209,75 @@ fn write_text<W: Write + Seek>(
         w.write_u8(if text.is_mirrored { 1 } else { 0 })?;
         w.write_i32(text.stroke_width.to_raw())?;
 
-        w.write_u8(if text.is_comment { 1 } else { 0 })?;
-        w.write_u8(if text.is_designator { 1 } else { 0 })?;
-        w.write_u8(0)?; // ext
-        w.write_u8(i32::from(text.text_kind) as u8)?;
-        w.write_u8(if text.font_bold { 1 } else { 0 })?;
-        w.write_u8(if text.font_italic { 1 } else { 0 })?;
-        w.write_font_name(text.font_name.as_deref().unwrap_or("Arial"))?;
-        // The inverted/wide-string fields follow the font name directly
-        // (subrecord byte offsets 110..137, the layout KiCad's importer
-        // expects); barcode fields live in an optional tail we don't emit.
-        w.write_u8(if text.is_inverted { 1 } else { 0 })?;
-        w.write_i32(text.inverted_border.to_raw())?;
-        w.write_i32(wide_string_index)?;
-        w.write_i32(0)?;
-        w.write_u8(if text.use_inverted_rectangle { 1 } else { 0 })?;
-        w.write_i32(text.inverted_rect_width.to_raw())?;
-        w.write_i32(text.inverted_rect_height.to_raw())?;
-        w.write_u8(i32::from(text.inverted_rect_justification) as u8)?;
-        w.write_i32(text.inverted_rect_text_offset.to_raw())?;
+        // Offsets 40..252 follow Altium's canonical 252-byte text record
+        // (the same layout KiCad's ATEXT6 importer reads). Altium only
+        // honours the justification byte at 132 when the
+        // `justification_valid` flag at 240 is set.
+        w.write_u8(if text.is_comment { 1 } else { 0 })?; // 40
+        w.write_u8(if text.is_designator { 1 } else { 0 })?; // 41
+        w.write_u8(text.char_set as u8)?; // 42
+        w.write_u8(i32::from(text.text_kind) as u8)?; // 43 base font type
+        w.write_u8(if text.font_bold { 1 } else { 0 })?; // 44
+        w.write_u8(if text.font_italic { 1 } else { 0 })?; // 45
+        w.write_font_name(text.font_name.as_deref().unwrap_or("Arial"))?; // 46..110
+        w.write_u8(if text.is_inverted { 1 } else { 0 })?; // 110
+        w.write_i32(text.inverted_border.to_raw())?; // 111
+        w.write_i32(wide_string_index)?; // 115
+        w.write_i32(text.union_index)?; // 119
+        w.write_u8(if text.use_inverted_rectangle { 1 } else { 0 })?; // 123
+        w.write_i32(text.inverted_rect_width.to_raw())?; // 124
+        w.write_i32(text.inverted_rect_height.to_raw())?; // 128
+        w.write_u8(text.justification.to_pcb_autoposition())?; // 132
+        w.write_i32(text.inverted_rect_text_offset.to_raw())?; // 133
+        w.write_i32(text.bar_code_full_width.to_raw())?; // 137
+        w.write_i32(text.bar_code_full_height.to_raw())?; // 141
+        w.write_i32(text.bar_code_x_margin.to_raw())?; // 145
+        w.write_i32(text.bar_code_y_margin.to_raw())?; // 149
+        w.write_i32(text.bar_code_min_width.to_raw())?; // 153
+        w.write_u8(text.bar_code_kind as u8)?; // 157
+        w.write_u8(text.bar_code_render_mode as u8)?; // 158
+        w.write_u8(if text.bar_code_inverted { 1 } else { 0 })?; // 159
+        w.write_u8(i32::from(text.text_kind) as u8)?; // 160 authoritative kind
+        w.write_font_name(text.bar_code_font_name.as_deref().unwrap_or("Arial"))?; // 161..225
+        w.write_u8(if text.bar_code_show_text { 1 } else { 0 })?; // 225
+        w.write_u32(if text.layer_v7 != 0 {
+            text.layer_v7
+        } else {
+            v7_layer_id(text.layer)
+        })?; // 226
+        w.write_u8(if text.is_frame { 1 } else { 0 })?; // 230
+        w.write_u8(if text.is_offset_border { 1 } else { 0 })?; // 231
+        w.write_i32(i32::MIN)?; // 232 reserved
+        w.write_i32(i32::MIN)?; // 236 reserved
+        w.write_u8(if text.justification_valid { 1 } else { 0 })?; // 240
+        w.write_u8(if text.advance_snapping { 1 } else { 0 })?; // 241
+        w.write_i16(0)?; // 242
+        w.write_i32(text.snap_point_x.to_raw())?; // 244
+        w.write_i32(text.snap_point_y.to_raw())?; // 248
         Ok(())
     })?;
     bw.write_pascal_string_block(&text.text)
+}
+
+/// Altium's V7 layer identifier for a legacy layer byte (the value stored in
+/// the extended tails of text/fill/arc records and in `LAYER_V8_*LAYERID`).
+pub(crate) fn v7_layer_id(layer: i32) -> u32 {
+    match layer {
+        32 => 0x0100_FFFF,
+        1..=31 => 0x0100_0000 + layer as u32,
+        39..=54 => 0x0101_0000 + (layer - 38) as u32,
+        57..=72 => 0x0102_0000 + (layer - 56) as u32,
+        33 => 0x0103_0006,
+        34 => 0x0103_0007,
+        35 => 0x0103_0008,
+        36 => 0x0103_0009,
+        37 => 0x0103_000A,
+        38 => 0x0103_000B,
+        55 => 0x0103_000C,
+        56 => 0x0103_000D,
+        73 => 0x0103_000E,
+        _ => 0x0103_000F, // multi-layer (also the fallback)
+    }
 }
 
 fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<()> {
@@ -964,6 +1291,8 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
                 is_tenting_top: fill.is_tenting_top,
                 is_tenting_bottom: fill.is_tenting_bottom,
                 is_keepout: fill.is_keepout,
+                extra: fill.flags_extra,
+                ..PrimitiveFlags::default()
             },
             fill.net_index as i32,
             fill.component_index,
@@ -982,6 +1311,8 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
             is_tenting_top: fill.is_tenting_top,
             is_tenting_bottom: fill.is_tenting_bottom,
             is_keepout: fill.is_keepout,
+            extra: fill.flags_extra,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -997,7 +1328,6 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
         Ok(())
     })
 }
-
 
 /// Rebuild a region record from its raw bytes: patch the common prefix,
 /// keep the parameter block verbatim, re-emit outline + holes from the
@@ -1041,6 +1371,9 @@ fn splice_region_raw(raw: &[u8], region: &Region) -> Option<Vec<u8>> {
             is_tenting_top: region.is_tenting_top,
             is_tenting_bottom: region.is_tenting_bottom,
             is_keepout: region.is_keepout,
+            extra: region.flags_extra,
+            is_teardrop: region.is_teardrop,
+            ..PrimitiveFlags::default()
         },
         region.net_index as i32,
         region.component_index,
@@ -1121,6 +1454,9 @@ fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> R
             is_tenting_top: region.is_tenting_top,
             is_tenting_bottom: region.is_tenting_bottom,
             is_keepout: region.is_keepout,
+            extra: region.flags_extra,
+            is_teardrop: region.is_teardrop,
+            ..PrimitiveFlags::default()
         }
         .encode();
         write_common_prefix_full(
@@ -1152,7 +1488,11 @@ fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> R
         );
         params.insert(
             "ISSHAPEBASED",
-            if region.is_shape_based { "TRUE" } else { "FALSE" },
+            if region.is_shape_based {
+                "TRUE"
+            } else {
+                "FALSE"
+            },
         );
         if let Some(net) = &region.net {
             params.insert("NET", net.clone());
@@ -1303,6 +1643,8 @@ fn write_component_body<W: Write + Seek>(
             is_tenting_top: body.is_tenting_top,
             is_tenting_bottom: body.is_tenting_bottom,
             is_keepout: body.is_keepout,
+            extra: body.flags_extra,
+            ..PrimitiveFlags::default()
         }
         .encode();
         let layer = layer_name_to_byte(&body.layer_name);
@@ -1310,9 +1652,17 @@ fn write_component_body<W: Write + Seek>(
         w.write_u32(0)?;
         w.write_u8(0)?;
 
+        // Key order follows what Altium writes for a component body.
+        let extra = body.additional_parameters.clone().unwrap_or_default();
         let mut params = ParameterMap::new();
         params.insert("V7_LAYER", body.layer_name.clone());
-        params.insert("NAME", body.name.clone().unwrap_or_else(|| " ".to_string()));
+        params.insert(
+            "NAME",
+            body.name
+                .clone()
+                .filter(|n| !n.is_empty())
+                .unwrap_or_else(|| " ".to_string()),
+        );
         params.insert("KIND", body.kind.to_string());
         params.insert("SUBPOLYINDEX", body.sub_poly_index.to_string());
         params.insert("UNIONINDEX", body.union_index.to_string());
@@ -1347,14 +1697,27 @@ fn write_component_body<W: Write + Seek>(
         params.insert("BODYPROJECTION", body.body_projection.to_string());
         params.insert("BODYCOLOR3D", body.body_color_3d.to_string());
         params.insert("BODYOPACITY3D", format!("{:.3}", body.body_opacity_3d));
-        if let Some(id) = &body.identifier {
-            params.insert("IDENTIFIER", id.clone());
+        if let Some(v) = extra.get("BODYOVERRIDECOLOR") {
+            params.insert("BODYOVERRIDECOLOR", v.clone());
+        }
+        params.insert("IDENTIFIER", body.identifier.clone().unwrap_or_default());
+        params.insert("TEXTURE", body.texture.clone().unwrap_or_default());
+        for key in [
+            "TEXTURECENTERX",
+            "TEXTURECENTERY",
+            "TEXTURESIZEX",
+            "TEXTURESIZEY",
+            "TEXTUREROTATION",
+        ] {
+            if let Some(v) = extra.get(key) {
+                params.insert(key, v.clone());
+            }
         }
         params.insert(
             "MODELID",
             format_model_id(body.model_id.as_deref().unwrap_or_default()),
         );
-        params.insert("MODEL.CHECKSUM", body.model_checksum.to_string());
+        params.insert("MODEL.CHECKSUM", (body.model_checksum as u32).to_string());
         params.insert(
             "MODEL.EMBED",
             if body.model_embed { "TRUE" } else { "FALSE" },
@@ -1379,21 +1742,60 @@ fn write_component_body<W: Write + Seek>(
             "MODEL.3D.DZ",
             super::doc_codec::format_mil_coord(body.model_3d_dz),
         );
-        params.insert("MODEL.MODELTYPE", body.model_type.to_string());
-        params.insert(
-            "MODEL.MODELSOURCE",
-            body.model_source.clone().unwrap_or_default(),
-        );
-        if let Some(t) = &body.texture {
-            params.insert("TEXTURE", t.clone());
-        }
-        // additional_parameters override anything above when present.
-        if let Some(extra) = &body.additional_parameters {
-            for (k, v) in extra {
-                params.insert(k, v.clone());
+        // Snap points sit between MODEL.3D.DZ and MODEL.MODELTYPE.
+        if let Some(v) = extra.get("MODEL.SNAPCOUNT") {
+            params.insert("MODEL.SNAPCOUNT", v.clone());
+            for i in 0.. {
+                let keys = [
+                    format!("MODEL.S{i}X"),
+                    format!("MODEL.S{i}Y"),
+                    format!("MODEL.S{i}Z"),
+                ];
+                if !extra.contains_key(&keys[0]) {
+                    break;
+                }
+                for k in &keys {
+                    if let Some(v) = extra.get(k) {
+                        params.insert(k, v.clone());
+                    }
+                }
             }
         }
-        write_c_string_param_block(w, &params)?;
+        params.insert("MODEL.MODELTYPE", body.model_type.to_string());
+        // Older bodies have no MODEL.MODELSOURCE at all; only write what was there.
+        if let Some(src) = &body.model_source {
+            params.insert("MODEL.MODELSOURCE", src.clone());
+        }
+        // Extruded bodies: height range, then the contour in vertex order.
+        for key in [
+            "MODEL.EXTRUDED.MINZ",
+            "MODEL.EXTRUDED.MAXZ",
+            "MAINCONTOURVERTEXCOUNT",
+        ] {
+            if let Some(v) = extra.get(key) {
+                params.insert(key, v.clone());
+            }
+        }
+        if let Some(n) = extra
+            .get("MAINCONTOURVERTEXCOUNT")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            for i in 0..n {
+                for prefix in ["KIND", "VX", "VY", "CX", "CY", "SA", "EA", "R"] {
+                    let key = format!("{prefix}{i}");
+                    if let Some(v) = extra.get(&key) {
+                        params.insert(&key, v.clone());
+                    }
+                }
+            }
+        }
+        // Anything else carried in additional_parameters (e.g. the extruded
+        // body MINZ/MAXZ pair) overrides the above or is appended.
+        for (k, v) in &extra {
+            params.insert(k, v.clone());
+        }
+        // Altium writes the body parameter string without a leading `|`.
+        write_body_param_block(w, &params)?;
 
         w.write_u32(body.outline.len() as u32)?;
         for pt in &body.outline {
@@ -1506,10 +1908,9 @@ fn write_doc_board(cf: &mut CompoundFile, document: &Document) -> Result<()> {
     cf.create_storage("Board6")?;
     write_storage_header(cf, "Board6/Header", 1)?;
 
-    let entries: Vec<(String, String)> =
-        super::defaults::ensure_pcbdoc_board_parameters_complete(
-            document.board_parameters.as_ref().map(|v| v.as_slice()),
-        );
+    let entries: Vec<(String, String)> = super::defaults::ensure_pcbdoc_board_parameters_complete(
+        document.board_parameters.as_ref().map(|v| v.as_slice()),
+    );
 
     let mut buf = Cursor::new(Vec::<u8>::new());
     let mut bw = BinaryWriter::new(&mut buf);
@@ -1662,8 +2063,20 @@ fn write_doc_storages_in_canonical_order(
 
     write_doc_board(cf, doc)?;
 
-    emit_or_consume(cf, leftover, "Advanced Placer Options6", 0, &default_advanced_placer)?;
-    emit_or_consume(cf, leftover, "Design Rule Checker Options6", 0, &default_drc)?;
+    emit_or_consume(
+        cf,
+        leftover,
+        "Advanced Placer Options6",
+        0,
+        &default_advanced_placer,
+    )?;
+    emit_or_consume(
+        cf,
+        leftover,
+        "Design Rule Checker Options6",
+        0,
+        &default_drc,
+    )?;
 
     write_doc_classes(cf, doc)?;
     emit_or_consume(cf, leftover, "Classes6", 0, &[])?;
@@ -1770,19 +2183,25 @@ fn emit_or_consume(
 
 #[allow(dead_code)]
 fn write_doc_default_root_stubs(cf: &mut CompoundFile, document: &Document) -> Result<()> {
-    if !document.additional_streams.contains_key("FileVersionInfo/Header") {
+    if !document
+        .additional_streams
+        .contains_key("FileVersionInfo/Header")
+    {
         cf.write_stream("FileVersionInfo/Header", &u32_le_bytes(1))?;
     }
-    if !document.additional_streams.contains_key("FileVersionInfo/Data") {
+    if !document
+        .additional_streams
+        .contains_key("FileVersionInfo/Data")
+    {
         cf.write_stream("FileVersionInfo/Data", &default_file_version_info_data())?;
     }
 
     // Each stub is a 4-byte u32 record-count + a (usually empty) data payload.
     let mut emit = |path: &str, header: u32, data: &[u8]| -> Result<()> {
-        if document.additional_streams.contains_key(&format!(
-            "{}/Header",
-            path
-        )) {
+        if document
+            .additional_streams
+            .contains_key(&format!("{}/Header", path))
+        {
             return Ok(());
         }
         if cf.is_storage(path) {

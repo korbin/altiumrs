@@ -6,14 +6,12 @@ use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek};
 use std::path::Path;
 
-use flate2::read::ZlibDecoder;
 use indexmap::IndexMap;
 use tokio::io::AsyncRead;
 
 use super::binary::{ObjectId, PrimitiveFlags, read_common_prefix, read_coord_point};
 use super::component::Component;
 use super::library::Library;
-use super::model3d::Model3d;
 use super::primitives::{Arc, ComponentBody, Fill, Pad, Region, Text, Track, Via};
 use crate::binary::BinaryReader;
 use crate::compound::CompoundFile;
@@ -35,8 +33,9 @@ impl Library {
 
         read_file_header(&mut cf, &mut library, &mut diagnostics)?;
         preserve_root_streams(&mut cf, &mut library)?;
-        let section_keys = read_section_keys(&mut cf)?;
+        let (section_keys, section_key_order) = read_section_keys(&mut cf)?;
         library.section_keys = section_keys.clone();
+        library.section_key_order = section_key_order;
         read_library(&mut cf, &mut library, &section_keys, &mut diagnostics)?;
 
         library.diagnostics = diagnostics;
@@ -122,43 +121,23 @@ fn preserve_root_streams(cf: &mut CompoundFile, library: &mut Library) -> Result
     Ok(())
 }
 
-fn read_section_keys(cf: &mut CompoundFile) -> Result<BTreeMap<String, String>> {
+fn read_section_keys(cf: &mut CompoundFile) -> Result<(BTreeMap<String, String>, Vec<String>)> {
     let mut map = BTreeMap::new();
+    let mut order = Vec::new();
     let Some(data) = cf.try_read_stream("SectionKeys")? else {
-        return Ok(map);
+        return Ok((map, order));
     };
     let mut br = BinaryReader::new(Cursor::new(data))?;
     let count = br.read_i32()?;
     for _ in 0..count {
-        let lib_ref = br.read_pascal_string()?;
+        // Both fields are `[i32 size][u8 len][bytes]` blocks — the same
+        // shape `write_section_keys_stream` emits and Altium itself uses.
+        let lib_ref = br.read_pascal_string_block()?;
         let section_key = br.read_pascal_string_block()?;
+        order.push(lib_ref.clone());
         map.insert(lib_ref, section_key);
     }
-    Ok(map)
-}
-
-/// Parse a `[i32 size][u8 len][len bytes][padding]` block (used for refnames
-/// in the `SectionKeys` stream).
-#[allow(dead_code)]
-fn read_pascal_block<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<String> {
-    let (_flags, size) = br.read_block_header()?;
-    if size == 0 {
-        return Ok(String::new());
-    }
-    let len = br.read_u8()? as u32;
-    let mut consumed = 1u32;
-    let s = if len == 0 {
-        String::new()
-    } else {
-        let mut buf = vec![0u8; len as usize];
-        br.read_exact(&mut buf)?;
-        consumed += len;
-        encoding::decode(&buf)
-    };
-    if consumed < size {
-        br.skip(u64::from(size - consumed))?;
-    }
-    Ok(s)
+    Ok((map, order))
 }
 
 fn read_library(
@@ -177,11 +156,7 @@ fn read_library(
     // Library-level parameters
     let header_params = read_param_map(&mut br)?;
     if !header_params.is_empty() {
-        let mut typed = BTreeMap::new();
-        for (name, value, _is_utf8) in header_params.iter() {
-            typed.insert(name.to_string(), value.to_string());
-        }
-        library.library_parameters = Some(typed);
+        library.library_parameters = Some(header_params);
     }
 
     // Component count + entries.
@@ -198,7 +173,9 @@ fn read_library(
     }
 
     // Preserve unknown library children.
-    let known_children: &[&str] = &["Header", "Data", "Models"];
+    // ComponentParamsTOC is a derived table (name, pad count, height and
+    // description of every footprint) and is regenerated on write.
+    let known_children: &[&str] = &["Header", "Data", "Models", "ComponentParamsTOC"];
     let entries = cf.list_children("Library")?;
     for entry in entries {
         if known_children
@@ -236,7 +213,9 @@ fn read_models(cf: &mut CompoundFile, library: &mut Library) -> Result<()> {
         None => Vec::new(),
     };
     library.models = super::model3d::build_models(&metas, |i| {
-        cf.try_read_stream(format!("Library/Models/{i}")).ok().flatten()
+        cf.try_read_stream(format!("Library/Models/{i}"))
+            .ok()
+            .flatten()
     })?;
     Ok(())
 }
@@ -304,41 +283,49 @@ fn read_footprint(
             match ObjectId::from_byte(id) {
                 Some(ObjectId::Arc) => {
                     if let Some(arc) = read_arc(&mut br)? {
+                        component.primitive_order.push(id);
                         component.arcs.push(arc);
                     }
                 }
                 Some(ObjectId::Pad) => {
                     if let Some(pad) = read_pad(&mut br)? {
+                        component.primitive_order.push(id);
                         component.pads.push(pad);
                     }
                 }
                 Some(ObjectId::Via) => {
                     if let Some(via) = read_via(&mut br)? {
+                        component.primitive_order.push(id);
                         component.vias.push(via);
                     }
                 }
                 Some(ObjectId::Track) => {
                     if let Some(track) = read_track(&mut br)? {
+                        component.primitive_order.push(id);
                         component.tracks.push(track);
                     }
                 }
                 Some(ObjectId::Text) => {
                     if let Some(text) = read_text(&mut br, &wide_strings)? {
+                        component.primitive_order.push(id);
                         component.texts.push(text);
                     }
                 }
                 Some(ObjectId::Fill) => {
                     if let Some(fill) = read_fill(&mut br)? {
+                        component.primitive_order.push(id);
                         component.fills.push(fill);
                     }
                 }
                 Some(ObjectId::Region) => {
                     if let Some(region) = read_region(&mut br)? {
+                        component.primitive_order.push(id);
                         component.regions.push(region);
                     }
                 }
                 Some(ObjectId::ComponentBody) => {
                     if let Some(body) = read_component_body(&mut br)? {
+                        component.primitive_order.push(id);
                         component.component_bodies.push(body);
                     }
                 }
@@ -423,8 +410,9 @@ fn extract_remaining_parameters(
 }
 
 fn read_param_map<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<ParameterMap> {
-    let raw = br.read_c_string_block()?;
-    Ok(ParameterMap::parse(&raw))
+    let bytes = br.read_block()?;
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    Ok(ParameterMap::parse_bytes(&bytes[..end], b'|'))
 }
 
 // Primitives
@@ -468,6 +456,8 @@ fn read_arc<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Arc>> {
     arc.is_tenting_top = pf.is_tenting_top;
     arc.is_tenting_bottom = pf.is_tenting_bottom;
     arc.is_keepout = pf.is_keepout;
+    arc.flags_extra = pf.extra;
+    arc.is_polygon_outline = pf.is_polygon_outline;
     arc.raw_record = Some(body);
     Ok(Some(arc))
 }
@@ -680,6 +670,9 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     pad.is_tenting_top = pf.is_tenting_top;
     pad.is_tenting_bottom = pf.is_tenting_bottom;
     pad.is_keepout = pf.is_keepout;
+    pad.flags_extra = pf.extra;
+    pad.is_testpoint_fab_top = pf.is_testpoint_fab_top;
+    pad.is_testpoint_fab_bottom = pf.is_testpoint_fab_bottom;
 
     // Top-layer corner-radius percentage. Altium stores per-layer
     // values in the SS block's `per_layer_corner_radii` array (0..100,
@@ -764,6 +757,9 @@ fn read_via<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Via>> {
     via.is_tenting_top = pf.is_tenting_top;
     via.is_tenting_bottom = pf.is_tenting_bottom;
     via.is_keepout = pf.is_keepout;
+    via.flags_extra = pf.extra;
+    via.is_testpoint_fab_top = pf.is_testpoint_fab_top;
+    via.is_testpoint_fab_bottom = pf.is_testpoint_fab_bottom;
 
     let consumed = br.position()? - start;
     let block_size = u64::from(size);
@@ -859,6 +855,8 @@ fn read_track<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Track>>
     track.is_tenting_top = pf.is_tenting_top;
     track.is_tenting_bottom = pf.is_tenting_bottom;
     track.is_keepout = pf.is_keepout;
+    track.flags_extra = pf.extra;
+    track.is_polygon_outline = pf.is_polygon_outline;
     track.raw_record = Some(body);
     Ok(Some(track))
 }
@@ -898,6 +896,25 @@ fn read_text<R: Read + Seek>(
     let mut font_inverted_rect_text_offset = 0i32;
     let mut is_comment = false;
     let mut is_designator = false;
+    let mut union_index = 0i32;
+    let mut has_extended_tail = false;
+    let mut bar_code_full_width = 0i32;
+    let mut bar_code_full_height = 0i32;
+    let mut bar_code_x_margin = 0i32;
+    let mut bar_code_y_margin = 0i32;
+    let mut bar_code_min_width = 0i32;
+    let mut bar_code_kind = 0u8;
+    let mut bar_code_render_mode = 0u8;
+    let mut bar_code_inverted = false;
+    let mut bar_code_font_name: Option<String> = None;
+    let mut bar_code_show_text = false;
+    let mut is_frame = false;
+    let mut is_offset_border = false;
+    let mut v7_tail = 0u32;
+    let mut justification_valid = false;
+    let mut advance_snapping = false;
+    let mut snap_point_x = 0i32;
+    let mut snap_point_y = 0i32;
 
     let block_size = u64::from(size);
     if block_size >= 123 {
@@ -918,12 +935,40 @@ fn read_text<R: Read + Seek>(
         font_inverted = br.read_u8()? != 0;
         font_inverted_border = br.read_i32()?;
         wide_string_index = br.read_i32()?;
-        br.skip(4)?;
+        union_index = br.read_i32()?;
         font_inverted_rect = br.read_u8()? != 0;
         font_inverted_rect_width = br.read_i32()?;
         font_inverted_rect_height = br.read_i32()?;
         font_inverted_rect_justification = br.read_u8()?;
         font_inverted_rect_text_offset = br.read_i32()?;
+    }
+    // Altium writes a 252-byte record: barcode block, the authoritative
+    // text-kind byte, V7 layer id, frame flags, the justification-valid flag
+    // and the snap point (offsets 137..252, the same layout KiCad's ATEXT6
+    // importer reads).
+    if block_size >= 252 {
+        has_extended_tail = true;
+        bar_code_full_width = br.read_i32()?; // 137
+        bar_code_full_height = br.read_i32()?; // 141
+        bar_code_x_margin = br.read_i32()?; // 145
+        bar_code_y_margin = br.read_i32()?; // 149
+        bar_code_min_width = br.read_i32()?; // 153
+        bar_code_kind = br.read_u8()?; // 157
+        bar_code_render_mode = br.read_u8()?; // 158
+        bar_code_inverted = br.read_u8()? != 0; // 159
+        let kind_byte = br.read_u8()?; // 160 authoritative text kind
+        text_kind = PcbTextKind::try_from(i32::from(kind_byte)).unwrap_or(text_kind);
+        bar_code_font_name = Some(br.read_font_name()?); // 161..225
+        bar_code_show_text = br.read_u8()? != 0; // 225
+        v7_tail = br.read_u32()?; // 226 V7 layer id
+        is_frame = br.read_u8()? != 0; // 230
+        is_offset_border = br.read_u8()? != 0; // 231
+        br.skip(8)?; // 232 two reserved i32 (0x8000_0000)
+        justification_valid = br.read_u8()? != 0; // 240
+        advance_snapping = br.read_u8()? != 0; // 241
+        br.skip(2)?; // 242
+        snap_point_x = br.read_i32()?; // 244
+        snap_point_y = br.read_i32()?; // 248
     }
 
     let consumed = br.position()? - start;
@@ -965,21 +1010,52 @@ fn read_text<R: Read + Seek>(
     text.use_inverted_rectangle = font_inverted_rect;
     text.inverted_rect_width = Coord::from_raw(font_inverted_rect_width);
     text.inverted_rect_height = Coord::from_raw(font_inverted_rect_height);
-    text.inverted_rect_justification =
-        TextJustification::try_from(i32::from(font_inverted_rect_justification))
-            .unwrap_or(TextJustification::BottomLeft);
+    // Offset 132 is Altium's `TTextAutoposition` byte (0 = manual) — the one
+    // justification the format carries, for both the inverted-rect frame and
+    // (when `justification_valid` is set) the text itself.
+    let justification = TextJustification::from_pcb_autoposition(font_inverted_rect_justification)
+        .unwrap_or(TextJustification::BottomLeft);
+    text.justification = justification;
+    text.inverted_rect_justification = justification;
     text.inverted_rect_text_offset = Coord::from_raw(font_inverted_rect_text_offset);
     text.barcode_lr_margin = Coord::from_raw(barcode_lr_margin);
     text.barcode_tb_margin = Coord::from_raw(barcode_tb_margin);
     text.wide_string_index = wide_string_index;
     text.is_comment = is_comment;
     text.is_designator = is_designator;
+    text.union_index = union_index;
+    if has_extended_tail {
+        text.bar_code_full_width = Coord::from_raw(bar_code_full_width);
+        text.bar_code_full_height = Coord::from_raw(bar_code_full_height);
+        text.bar_code_x_margin = Coord::from_raw(bar_code_x_margin);
+        text.bar_code_y_margin = Coord::from_raw(bar_code_y_margin);
+        text.bar_code_min_width = Coord::from_raw(bar_code_min_width);
+        text.bar_code_kind = i32::from(bar_code_kind);
+        text.bar_code_render_mode = i32::from(bar_code_render_mode);
+        text.bar_code_inverted = bar_code_inverted;
+        text.bar_code_font_name = bar_code_font_name;
+        text.bar_code_show_text = bar_code_show_text;
+        text.is_frame = is_frame;
+        text.is_offset_border = is_offset_border;
+        text.justification_valid = justification_valid;
+        text.advance_snapping = advance_snapping;
+        text.snap_point_x = Coord::from_raw(snap_point_x);
+        text.snap_point_y = Coord::from_raw(snap_point_y);
+    }
 
     let pf = PrimitiveFlags::decode(flags_bits);
     text.is_locked = pf.is_locked;
     text.is_tenting_top = pf.is_tenting_top;
     text.is_tenting_bottom = pf.is_tenting_bottom;
     text.is_keepout = pf.is_keepout;
+    text.flags_extra = pf.extra;
+    // Mechanical layers 17..32 do not fit the layer byte (Altium clamps it to
+    // Mechanical 16) and live only in the V7 id; keep it when it disagrees.
+    text.layer_v7 = if v7_tail == super::writer::v7_layer_id(text.layer) {
+        0
+    } else {
+        v7_tail
+    };
     Ok(Some(text))
 }
 
@@ -1018,6 +1094,7 @@ fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
     fill.is_tenting_top = pf.is_tenting_top;
     fill.is_tenting_bottom = pf.is_tenting_bottom;
     fill.is_keepout = pf.is_keepout;
+    fill.flags_extra = pf.extra;
     fill.raw_record = Some(body);
     Ok(Some(fill))
 }
@@ -1203,6 +1280,8 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
     region.is_tenting_top = pf.is_tenting_top;
     region.is_tenting_bottom = pf.is_tenting_bottom;
     region.is_keepout = pf.is_keepout;
+    region.flags_extra = pf.extra;
+    region.is_teardrop = pf.is_teardrop;
 
     let consumed_keys = [
         "KIND",
@@ -1353,8 +1432,13 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     if let Some(v) = get_coord("MODEL.3D.DZ") {
         body.model_3d_dz = v;
     }
-    if let Some(v) = parameters.get_i32("MODEL.CHECKSUM") {
-        body.model_checksum = v;
+    // Altium writes the body checksum as an unsigned decimal (the model
+    // record stores the same bits signed); keep the bit pattern.
+    if let Some(v) = parameters
+        .get("MODEL.CHECKSUM")
+        .and_then(|s| s.trim().parse::<i64>().ok())
+    {
+        body.model_checksum = v as u32 as i32;
     }
     if let Some(v) = parameters.get("MODEL.NAME") {
         body.model_name = Some(v.to_string());
@@ -1362,9 +1446,8 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     if let Some(v) = parameters.get_i32("MODEL.MODELTYPE") {
         body.model_type = v;
     }
-    if let Some(v) = parameters.get("MODEL.MODELSOURCE") {
-        body.model_source = Some(v.to_string());
-    }
+    // Absent on bodies written by older Altium versions; keep it absent.
+    body.model_source = parameters.get("MODEL.MODELSOURCE").map(|v| v.to_string());
     if let Some(v) = parameters.get_i32("BODYPROJECTION") {
         body.body_projection = v;
     }
@@ -1380,6 +1463,7 @@ fn read_component_body<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Optio
     body.is_tenting_top = pf.is_tenting_top;
     body.is_tenting_bottom = pf.is_tenting_bottom;
     body.is_keepout = pf.is_keepout;
+    body.flags_extra = pf.extra;
 
     let consumed_keys = [
         "V7_LAYER",
@@ -1769,12 +1853,8 @@ fn parse_param_records(
         }
         let body = &data[pos..end];
         let null = body.iter().position(|&b| b == 0).unwrap_or(body.len());
-        let raw = crate::encoding::decode(&body[..null]);
+        let params = ParameterMap::parse_bytes(&body[..null], b'|');
         pos = end;
-        if raw.is_empty() {
-            continue;
-        }
-        let params = ParameterMap::parse(&raw);
         if params.is_empty() {
             continue;
         }

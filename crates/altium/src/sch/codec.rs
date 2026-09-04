@@ -8,10 +8,10 @@ use super::binary::{coord_from_dxp_frac, coord_to_dxp_frac, line_width_from_inde
 use super::component::Component;
 use super::implementation::{Implementation, MapDefiner};
 use super::primitives::{
-    HarnessConnector, HarnessEntry, HarnessType, SignalHarness,
-    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, Image, Junction, Label, Line,
-    NetLabel, NoErc, Parameter, ParameterSet, Pie, Pin, Polygon, Polyline, Port, PowerObject,
-    PrimitiveCommon, Rectangle, RoundedRectangle, SheetEntry, SheetSymbol, Symbol, TextFrame, Wire,
+    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, HarnessConnector, HarnessEntry,
+    HarnessType, Image, Junction, Label, Line, NetLabel, NoErc, Parameter, ParameterSet, Pie, Pin,
+    Polygon, Polyline, Port, PowerObject, PrimitiveCommon, Rectangle, RoundedRectangle, SheetEntry,
+    SheetSymbol, SignalHarness, Symbol, TextFrame, Wire,
 };
 use crate::coord::{Coord, CoordPoint};
 use crate::dto::sch as dto;
@@ -199,6 +199,25 @@ fn read_vertices(params: &ParameterMap, declared_count: i32, scan_extra: i32) ->
             coord_from_dxp_frac(yi, yf),
         ));
     }
+    // Altium caps a record at 50 numbered vertices; the rest continue as
+    // `EX51`/`EY51`… under `EXTRALOCATIONCOUNT`.
+    let extra = params.get_i32("EXTRALOCATIONCOUNT").unwrap_or(0).max(0);
+    let base = out.len() as i32;
+    for i in (base + 1)..=(base + extra) {
+        let xk = format!("EX{i}");
+        let yk = format!("EY{i}");
+        if !params.contains_key(&xk) && !params.contains_key(&yk) {
+            break;
+        }
+        let xi = params.get_i32(&xk).unwrap_or(0);
+        let yi = params.get_i32(&yk).unwrap_or(0);
+        let xf = params.get_i32(&format!("EX{i}_FRAC")).unwrap_or(0);
+        let yf = params.get_i32(&format!("EY{i}_FRAC")).unwrap_or(0);
+        out.push(CoordPoint::new(
+            coord_from_dxp_frac(xi, xf),
+            coord_from_dxp_frac(yi, yf),
+        ));
+    }
     out
 }
 
@@ -206,23 +225,38 @@ fn write_vertices(params: &mut ParameterMap, vertices: &[CoordPoint]) {
     if vertices.is_empty() {
         return;
     }
-    params.insert("LOCATIONCOUNT", vertices.len().to_string());
+    // Altium numbers at most 50 vertices as X{n}/Y{n}; anything beyond that is
+    // written as EX{n}/EY{n} under EXTRALOCATIONCOUNT.
+    const MAX_NUMBERED: usize = 50;
+    let numbered = vertices.len().min(MAX_NUMBERED);
+    params.insert("LOCATIONCOUNT", numbered.to_string());
     for (i, v) in vertices.iter().enumerate() {
         let idx = i + 1;
+        let (px, py) = if idx <= MAX_NUMBERED {
+            ("X", "Y")
+        } else {
+            ("EX", "EY")
+        };
         let (xi, xf) = coord_to_dxp_frac(v.x);
         let (yi, yf) = coord_to_dxp_frac(v.y);
         // Always emit X{n}/Y{n} even when zero — real Altium files write the
         // coordinate explicitly, and round-tripping needs to preserve that.
         // FRAC subkeys keep the omit-on-zero convention since most whole-mil
         // values legitimately have zero fractional part.
-        params.insert(format!("X{idx}").as_str(), xi.to_string());
+        params.insert(format!("{px}{idx}").as_str(), xi.to_string());
         if xf != 0 {
-            params.insert(format!("X{idx}_FRAC").as_str(), xf.to_string());
+            params.insert(format!("{px}{idx}_FRAC").as_str(), xf.to_string());
         }
-        params.insert(format!("Y{idx}").as_str(), yi.to_string());
+        params.insert(format!("{py}{idx}").as_str(), yi.to_string());
         if yf != 0 {
-            params.insert(format!("Y{idx}_FRAC").as_str(), yf.to_string());
+            params.insert(format!("{py}{idx}_FRAC").as_str(), yf.to_string());
         }
+    }
+    if vertices.len() > MAX_NUMBERED {
+        params.insert(
+            "EXTRALOCATIONCOUNT",
+            (vertices.len() - MAX_NUMBERED).to_string(),
+        );
     }
 }
 
@@ -775,11 +809,11 @@ pub fn ellipse_to_params(e: &Ellipse, params: &mut ParameterMap) {
     let (r, rf) = coord_to_dxp_frac(e.radius_x);
     d.radius = r;
     d.radius_frac = rf;
-    if e.radius_y != e.radius_x {
-        let (sr, srf) = coord_to_dxp_frac(e.radius_y);
-        d.secondary_radius = sr;
-        d.secondary_radius_frac = srf;
-    }
+    // Altium always stores the secondary radius, even for circles: a record
+    // without it is read back with a zero secondary radius and vanishes.
+    let (sr, srf) = coord_to_dxp_frac(e.radius_y);
+    d.secondary_radius = sr;
+    d.secondary_radius_frac = srf;
     d.line_width = e.line_width;
     d.color = e.color;
     d.area_color = e.fill_color;
@@ -1612,8 +1646,14 @@ pub fn implementation_from_params(params: &ParameterMap) -> Implementation {
         model_name: params.get("MODELNAME").map(str::to_owned),
         model_type: params.get("MODELTYPE").map(str::to_owned),
         is_current: params.get_bool("ISCURRENT"),
-        data_file_kinds: collect_indexed(params, "MODELDATAFILEKIND", 1),
-        data_file_entities: collect_indexed(params, "MODELDATAFILEENTITY", 1),
+        // Altium numbers the model data files from 0 (`ModelDatafileKind0`).
+        data_file_kinds: collect_indexed(params, "MODELDATAFILEKIND", 0),
+        data_file_entities: collect_indexed(params, "MODELDATAFILEENTITY", 0),
+        integrated_model: params.get_bool("INTEGRATEDMODEL"),
+        database_model: params.get_bool("DATABASEMODEL"),
+        model_item_guid: params.get("MODELITEMGUID").map(str::to_owned),
+        model_revision_guid: params.get("MODELREVISIONGUID").map(str::to_owned),
+        model_vault_guid: params.get("MODELVAULTGUID").map(str::to_owned),
         map_definers: Vec::new(),
         common: common_record_from_params(params),
     }
@@ -1639,15 +1679,27 @@ pub fn implementation_to_params(impl_: &Implementation, params: &mut ParameterMa
         .max(impl_.data_file_entities.len());
     if max > 0 {
         params.insert("DATAFILECOUNT", max.to_string());
-        for (i, kind) in impl_.data_file_kinds.iter().enumerate() {
-            params.insert(format!("MODELDATAFILEKIND{}", i + 1).as_str(), kind.clone());
-        }
         for (i, ent) in impl_.data_file_entities.iter().enumerate() {
-            params.insert(
-                format!("MODELDATAFILEENTITY{}", i + 1).as_str(),
-                ent.clone(),
-            );
+            params.insert(format!("MODELDATAFILEENTITY{i}").as_str(), ent.clone());
         }
+        for (i, kind) in impl_.data_file_kinds.iter().enumerate() {
+            params.insert(format!("MODELDATAFILEKIND{i}").as_str(), kind.clone());
+        }
+    }
+    if impl_.integrated_model {
+        params.insert("INTEGRATEDMODEL", "T");
+    }
+    if impl_.database_model {
+        params.insert("DATABASEMODEL", "T");
+    }
+    if let Some(g) = &impl_.model_item_guid {
+        params.insert("MODELITEMGUID", g.clone());
+    }
+    if let Some(g) = &impl_.model_revision_guid {
+        params.insert("MODELREVISIONGUID", g.clone());
+    }
+    if let Some(g) = &impl_.model_vault_guid {
+        params.insert("MODELVAULTGUID", g.clone());
     }
     write_common_to_params(params, &impl_.common);
 }

@@ -48,7 +48,11 @@ fn parse_layer(s: &str) -> i32 {
 }
 
 pub(crate) fn format_mil_coord(c: Coord) -> String {
-    format!("{:.4}mil", c.to_mils())
+    // Altium writes "0mil", "0.5mil", "56.2992mil": up to four decimals with
+    // trailing zeros (and a bare point) trimmed.
+    let s = format!("{:.4}", c.to_mils());
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    format!("{}mil", if s.is_empty() || s == "-" { "0" } else { s })
 }
 
 /// Inverse of [`super::binary::layer_name_to_byte`] for param records that
@@ -237,7 +241,14 @@ pub fn component_to_params(component: &Component, params: &mut ParameterMap) {
     params.insert("Y", format_mil_coord(component.y));
     params.insert("ROTATION", component.rotation.to_string());
     params.insert("LAYER", layer_byte_to_name(component.layer));
-    params.insert("COMMENTON", if component.comment_on { "TRUE" } else { "FALSE" });
+    params.insert(
+        "COMMENTON",
+        if component.comment_on {
+            "TRUE"
+        } else {
+            "FALSE"
+        },
+    );
     params.insert("NAMEON", if component.name_on { "TRUE" } else { "FALSE" });
     // Autopositions, GROUPNUM, and CHANNELOFFSET travel via passthrough;
     // only non-default typed values are (re)written.

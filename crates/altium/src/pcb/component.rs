@@ -97,6 +97,11 @@ pub struct Component {
     pub fills: Vec<Fill>,
     pub regions: Vec<Region>,
     pub component_bodies: Vec<ComponentBody>,
+    /// Record kinds in the order they appeared in the `Data` stream (1 arc,
+    /// 2 pad, 3 via, 4 track, 5 text, 6 fill, 11 region, 12 body). Empty for
+    /// components built from scratch; the writer then groups by kind.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub primitive_order: Vec<u8>,
 }
 
 impl Component {

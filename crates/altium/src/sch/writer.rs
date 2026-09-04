@@ -6,7 +6,10 @@ use std::path::Path;
 
 use tokio::io::AsyncWrite;
 
-use super::binary::{coord_to_dxp_frac, write_compressed_storage};
+use super::binary::{
+    PinTextCustomisation, coord_to_dxp_frac, encode_pin_text_customisation,
+    write_compressed_storage,
+};
 use super::codec;
 use super::component::{Component, RawRecord};
 use super::document::Document;
@@ -217,6 +220,10 @@ fn write_component_records<W: Write + Seek>(
     bw: &mut BinaryWriter<W>,
     component: &Component,
 ) -> Result<()> {
+    // Altium links implementation records (44..48) by record index inside
+    // the component's Data stream. The component header (RECORD=1) is emitted
+    // by the caller and sits at index 0, so counting starts at 1.
+    let mut rec_idx: i32 = 1;
     // RECORD=1 (Component) goes first.
     let mut params = ParameterMap::new();
     params.insert("RECORD", "1");
@@ -229,60 +236,70 @@ fn write_component_records<W: Write + Seek>(
         p.insert("RECORD", "14");
         codec::rectangle_to_params(rect, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for bz in &component.beziers {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "5");
         codec::bezier_to_params(bz, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for poly in &component.polylines {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "6");
         codec::polyline_to_params(poly, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for poly in &component.polygons {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "7");
         codec::polygon_to_params(poly, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for e in &component.ellipses {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "8");
         codec::ellipse_to_params(e, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for pie in &component.pies {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "9");
         codec::pie_to_params(pie, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for r in &component.rounded_rectangles {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "10");
         codec::rounded_rectangle_to_params(r, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for ea in &component.elliptical_arcs {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "11");
         codec::elliptical_arc_to_params(ea, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for arc in &component.arcs {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "12");
         codec::arc_to_params(arc, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for line in &component.lines {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "13");
         codec::line_to_params(line, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
 
     // Pins go out as binary records (flag 0x01); per-pin font/color overrides
@@ -296,54 +313,63 @@ fn write_component_records<W: Write + Seek>(
             w.write_bytes(&body)?;
             Ok(())
         })?;
+        rec_idx += 1;
     }
     for sym in &component.symbols {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "3");
         codec::symbol_to_params(sym, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for label in &component.labels {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "4");
         codec::label_to_params(label, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for po in &component.power_objects {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "17");
         codec::power_object_to_params(po, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for nl in &component.net_labels {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "25");
         codec::net_label_to_params(nl, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for w in &component.wires {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "27");
         codec::wire_to_params(w, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for tf in &component.text_frames {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "28");
         codec::text_frame_to_params(tf, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for j in &component.junctions {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "29");
         codec::junction_to_params(j, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for img in &component.images {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "30");
         codec::image_to_params(img, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
     for param in &component.parameters {
         let mut p = ParameterMap::new();
@@ -359,31 +385,49 @@ fn write_component_records<W: Write + Seek>(
         p.insert("RECORD", record_id);
         codec::parameter_to_params(param, &mut p);
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
     }
 
     // Implementation hierarchy: ImplementationList → Implementation* →
     //   MapDefinerList → MapDefiner* → ImplementationParameters
     if !component.implementations.is_empty() {
+        // Altium's layout: 44 (list) → per model: 45 owned by the 44,
+        // 46 owned by the 45, 47s owned by the 46, 48 owned by the 45. The
+        // OwnerIndex links are record positions; Altium discards models whose
+        // MapDefiners are not attached this way.
+        let list_idx = rec_idx;
         let mut p = ParameterMap::new();
         p.insert("RECORD", "44");
         emit_param_record(bw, &p)?;
+        rec_idx += 1;
         for impl_ in &component.implementations {
+            let impl_idx = rec_idx;
             let mut p = ParameterMap::new();
             codec::implementation_to_params(impl_, &mut p);
+            p.insert("OWNERINDEX", list_idx.to_string());
             emit_param_record(bw, &p)?;
-            if !impl_.map_definers.is_empty() {
+            rec_idx += 1;
+            let map_list_idx = rec_idx;
+            let mut p = ParameterMap::new();
+            p.insert("RECORD", "46");
+            p.insert("OWNERINDEX", impl_idx.to_string());
+            emit_param_record(bw, &p)?;
+            rec_idx += 1;
+            for (i, map) in impl_.map_definers.iter().enumerate() {
                 let mut p = ParameterMap::new();
-                p.insert("RECORD", "46");
-                emit_param_record(bw, &p)?;
-                for map in &impl_.map_definers {
-                    let mut p = ParameterMap::new();
-                    codec::map_definer_to_params(map, &mut p);
-                    emit_param_record(bw, &p)?;
+                codec::map_definer_to_params(map, &mut p);
+                p.insert("OWNERINDEX", map_list_idx.to_string());
+                if i > 0 {
+                    p.insert("INDEXINSHEET", i.to_string());
                 }
+                emit_param_record(bw, &p)?;
+                rec_idx += 1;
             }
             let mut p = ParameterMap::new();
             p.insert("RECORD", "48");
+            p.insert("OWNERINDEX", impl_idx.to_string());
             emit_param_record(bw, &p)?;
+            rec_idx += 1;
         }
     }
 
@@ -443,20 +487,37 @@ fn build_pin_frac(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
     Ok(Some(buf.into_inner()))
 }
 
-/// Per-pin `PinTextData` stream: 14 bytes per pin (7 for designator, 7 for
-/// name) carrying the custom font/color toggles, zlib-compressed.
+/// Per-pin `PinTextData` stream: one zlib-compressed entry per customised
+/// pin holding the designator block then the name block (see
+/// [`PinTextCustomisation`] for the layout). Pins with no font / colour /
+/// position customisation get no entry, as in Altium-written libraries.
 fn build_pin_text_data(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
     let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
     for (i, pin) in pins.iter().enumerate() {
-        let designator_segment =
-            pin_text_data_segment(pin.designator_font_mode, pin.designator_custom_font_id);
-        let name_segment = pin_text_data_segment(pin.name_font_mode, pin.name_custom_font_id);
-        if designator_segment == [0u8; 7] && name_segment == [0u8; 7] {
+        let designator = pin_text_customisation(
+            pin.designator_font_mode,
+            pin.designator_custom_font_id,
+            pin.designator_custom_color,
+            pin.designator_position_mode,
+            pin.designator_custom_position_margin,
+            pin.designator_custom_position_rotation_anchor,
+            pin.designator_custom_position_rotation_relative,
+        );
+        let name = pin_text_customisation(
+            pin.name_font_mode,
+            pin.name_custom_font_id,
+            pin.name_custom_color,
+            pin.name_position_mode,
+            pin.name_custom_position_margin,
+            pin.name_custom_position_rotation_anchor,
+            pin.name_custom_position_rotation_relative,
+        );
+        if designator.is_default() && name.is_default() {
             continue;
         }
-        let mut body = Vec::with_capacity(14);
-        body.extend_from_slice(&designator_segment);
-        body.extend_from_slice(&name_segment);
+        let mut body = Vec::with_capacity(22);
+        encode_pin_text_customisation(&designator, &mut body);
+        encode_pin_text_customisation(&name, &mut body);
         entries.push((i.to_string(), body));
     }
     if entries.is_empty() {
@@ -471,12 +532,26 @@ fn build_pin_text_data(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
     Ok(Some(buf.into_inner()))
 }
 
-fn pin_text_data_segment(font_mode: i32, custom_font_id: i32) -> [u8; 7] {
-    if font_mode == 0 || custom_font_id == 0 {
-        return [0u8; 7];
+#[allow(clippy::too_many_arguments)]
+fn pin_text_customisation(
+    font_mode: i32,
+    custom_font_id: i32,
+    custom_color: i32,
+    position_mode: i32,
+    margin: i32,
+    rotation_anchor: i32,
+    rotation_relative: bool,
+) -> PinTextCustomisation {
+    let custom_font = font_mode != 0 && custom_font_id != 0;
+    PinTextCustomisation {
+        custom_position: position_mode != 0,
+        margin: if position_mode != 0 { margin } else { 0 },
+        rotation_anchor: rotation_anchor != 0,
+        rotation_relative,
+        custom_font,
+        font_id: if custom_font { custom_font_id as u8 } else { 0 },
+        color: if custom_font { custom_color } else { 0 },
     }
-    // 0x10 = "custom font enabled" bit; remaining bytes are color + position.
-    [0x10, custom_font_id as u8, 0, 0, 0, 0, 0]
 }
 
 fn build_pin_symbol_line_width(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
@@ -720,9 +795,13 @@ impl Document {
                 header.insert("Weight", count.to_string());
                 emit_param_record(&mut abw, &header)?;
                 for hc in &self.harness_connectors {
-                    emit_typed(&mut abw, "215", |p| codec::harness_connector_to_params(hc, p))?;
+                    emit_typed(&mut abw, "215", |p| {
+                        codec::harness_connector_to_params(hc, p)
+                    })?;
                     for entry in &hc.entries {
-                        emit_typed(&mut abw, "216", |p| codec::harness_entry_to_params(entry, p))?;
+                        emit_typed(&mut abw, "216", |p| {
+                            codec::harness_entry_to_params(entry, p)
+                        })?;
                     }
                     if let Some(ht) = &hc.harness_type {
                         emit_typed(&mut abw, "217", |p| codec::harness_type_to_params(ht, p))?;
