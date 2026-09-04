@@ -90,6 +90,10 @@ pub enum SchRecordType {
     MapDefinerList = 46,
     MapDefiner = 47,
     ImplementationParameters = 48,
+    HarnessConnector = 215,
+    HarnessEntry = 216,
+    HarnessType = 217,
+    SignalHarness = 218,
     Blanket = 225,
 }
 
@@ -130,6 +134,10 @@ impl SchRecordType {
             46 => Self::MapDefinerList,
             47 => Self::MapDefiner,
             48 => Self::ImplementationParameters,
+            215 => Self::HarnessConnector,
+            216 => Self::HarnessEntry,
+            217 => Self::HarnessType,
+            218 => Self::SignalHarness,
             225 => Self::Blanket,
             _ => return None,
         })

@@ -773,6 +773,70 @@ sch_record! {
     }
 }
 
+sch_record! {
+    /// Harness connector (record 215): the box that fans a signal harness
+    /// out into its member nets. `LOCATION` is the top-left corner.
+    "215" => HarnessConnectorDto {
+        #[altium(name = "LOCATION.X")] pub location_x: i32,
+        #[altium(name = "LOCATION.X_FRAC")] pub location_x_frac: i32,
+        #[altium(name = "LOCATION.Y")] pub location_y: i32,
+        #[altium(name = "LOCATION.Y_FRAC")] pub location_y_frac: i32,
+        #[altium(name = "XSIZE")] pub x_size: i32,
+        #[altium(name = "YSIZE")] pub y_size: i32,
+        /// Distance (DXP units) of the primary connection point from the
+        /// top of the side named by `HARNESSCONNECTORSIDE`.
+        #[altium(name = "PRIMARYCONNECTIONPOSITION")] pub primary_connection_position: i32,
+        #[altium(name = "HARNESSCONNECTORSIDE")] pub harness_connector_side: i32,
+        #[altium(name = "LINEWIDTH")] pub line_width: i32,
+        #[altium(name = "COLOR")] pub color: i32,
+        #[altium(name = "AREACOLOR")] pub area_color: i32,
+    }
+}
+
+sch_record! {
+    /// Harness entry (record 216): one named signal on a harness connector.
+    /// `DISTANCEFROMTOP` counts 100-mil grid slots, like a sheet entry.
+    "216" => HarnessEntryDto {
+        #[altium(name = "OWNERINDEXADDITIONALLIST")] pub owner_index_additional_list: bool,
+        #[altium(name = "SIDE")] pub side: i32,
+        #[altium(name = "DISTANCEFROMTOP")] pub distance_from_top: i32,
+        #[altium(name = "DISTANCEFROMTOP_FRAC")] pub distance_from_top_frac: i32,
+        #[altium(name = "NAME")] pub name: Option<String>,
+        #[altium(name = "COLOR")] pub color: i32,
+        #[altium(name = "AREACOLOR")] pub area_color: i32,
+        #[altium(name = "TEXTCOLOR")] pub text_color: i32,
+        #[altium(name = "TEXTFONTID")] pub text_font_id: i32,
+        #[altium(name = "TEXTSTYLE")] pub text_style: Option<String>,
+    }
+}
+
+sch_record! {
+    /// Harness type label (record 217): the harness-type text attached to a
+    /// harness connector.
+    "217" => HarnessTypeDto {
+        #[altium(name = "OWNERINDEXADDITIONALLIST")] pub owner_index_additional_list: bool,
+        #[altium(name = "LOCATION.X")] pub location_x: i32,
+        #[altium(name = "LOCATION.X_FRAC")] pub location_x_frac: i32,
+        #[altium(name = "LOCATION.Y")] pub location_y: i32,
+        #[altium(name = "LOCATION.Y_FRAC")] pub location_y_frac: i32,
+        #[altium(name = "TEXT")] pub text: Option<String>,
+        #[altium(name = "COLOR")] pub color: i32,
+        #[altium(name = "FONTID")] pub font_id: i32,
+        #[altium(name = "ISHIDDEN")] pub is_hidden: bool,
+        #[altium(name = "NOTAUTOPOSITION")] pub not_auto_position: bool,
+    }
+}
+
+sch_record! {
+    /// Signal harness (record 218): a polyline carrying a bundle of nets
+    /// between ports, sheet entries and harness connectors.
+    "218" => SignalHarnessDto {
+        #[altium(name = "COLOR")] pub color: i32,
+        #[altium(name = "LINEWIDTH")] pub line_width: i32,
+        #[altium(name = "LOCATIONCOUNT")] pub location_count: i32,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

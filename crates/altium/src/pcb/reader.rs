@@ -896,11 +896,17 @@ fn read_text<R: Read + Seek>(
     let mut font_inverted_rect_height = 0i32;
     let mut font_inverted_rect_justification = 0u8;
     let mut font_inverted_rect_text_offset = 0i32;
+    let mut is_comment = false;
+    let mut is_designator = false;
 
     let block_size = u64::from(size);
     if block_size >= 123 {
-        br.read_i16()?; // ext1
-        br.read_u8()?; // ext2
+        // Two component-role flag bytes precede the extension proper (same
+        // layout KiCad's ATEXT6 importer reads): the dedicated Comment and
+        // Name (designator) texts of a component are marked here.
+        is_comment = br.read_u8()? != 0;
+        is_designator = br.read_u8()? != 0;
+        br.read_u8()?; // ext
         text_kind = PcbTextKind::try_from(i32::from(br.read_u8()?)).unwrap_or(PcbTextKind::Stroke);
         font_bold = br.read_u8()? != 0;
         font_italic = br.read_u8()? != 0;
@@ -966,6 +972,8 @@ fn read_text<R: Read + Seek>(
     text.barcode_lr_margin = Coord::from_raw(barcode_lr_margin);
     text.barcode_tb_margin = Coord::from_raw(barcode_tb_margin);
     text.wide_string_index = wide_string_index;
+    text.is_comment = is_comment;
+    text.is_designator = is_designator;
 
     let pf = PrimitiveFlags::decode(flags_bits);
     text.is_locked = pf.is_locked;

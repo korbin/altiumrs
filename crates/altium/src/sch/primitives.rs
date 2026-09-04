@@ -601,3 +601,64 @@ sch_struct! {
         pub area_color: i32,
     }
 }
+
+sch_struct! {
+    /// Harness connector (record 215): fans a signal harness out into its
+    /// member nets. `location` is the top-left corner; entries hang off the
+    /// left/right edge `distance_from_top` below it, and the bundle attaches
+    /// at `primary_connection_position` down the `side` edge.
+    pub struct HarnessConnector {
+        pub entries: Vec<HarnessEntry>,
+        pub harness_type: Option<HarnessType>,
+        pub location: CoordPoint,
+        pub x_size: Coord,
+        pub y_size: Coord,
+        pub primary_connection_position: Coord,
+        // 0 = left, 1 = right, 2 = top, 3 = bottom.
+        pub side: i32,
+        pub line_width: i32,
+        pub color: i32,
+        pub area_color: i32,
+    }
+}
+
+sch_struct! {
+    /// One named signal on a [`HarnessConnector`] (record 216).
+    pub struct HarnessEntry {
+        // 0 = left, 1 = right.
+        pub side: i32,
+        // Distance below the connector's top edge (already scaled from
+        // Altium's 100-mil slot count to a coordinate).
+        pub distance_from_top: Coord,
+        pub name: String,
+        pub color: i32,
+        pub area_color: i32,
+        pub text_color: i32,
+        pub text_font_id: i32,
+        pub text_style: Option<String>,
+        pub owner_index_additional_list: bool,
+    }
+}
+
+sch_struct! {
+    /// Harness-type text on a [`HarnessConnector`] (record 217).
+    pub struct HarnessType {
+        pub location: CoordPoint,
+        pub text: String,
+        pub color: i32,
+        pub font_id: i32,
+        pub is_hidden: bool,
+        pub not_auto_position: bool,
+        pub owner_index_additional_list: bool,
+    }
+}
+
+sch_struct! {
+    /// Signal harness polyline (record 218): carries a bundle of nets
+    /// between ports, sheet entries and harness connectors.
+    pub struct SignalHarness {
+        pub vertices: Vec<CoordPoint>,
+        pub color: i32,
+        pub line_width: i32,
+    }
+}

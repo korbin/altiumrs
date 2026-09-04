@@ -15,7 +15,7 @@ pub use document::Document;
 pub use implementation::{Implementation, MapDefiner};
 pub use library::Library;
 pub use primitives::{
-    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, Image, Junction, Label, Line,
-    NetLabel, NoErc, Parameter, ParameterSet, Pie, Pin, Polygon, Polyline, Port, PowerObject,
+    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, HarnessConnector, HarnessEntry,
+    HarnessType, Image, Junction, Label, Line, NetLabel, SignalHarness, NoErc, Parameter, ParameterSet, Pie, Pin, Polygon, Polyline, Port, PowerObject,
     Rectangle, RoundedRectangle, SheetEntry, SheetSymbol, Symbol, TextFrame, Wire,
 };

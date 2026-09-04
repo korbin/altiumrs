@@ -929,8 +929,9 @@ fn write_text<W: Write + Seek>(
         w.write_u8(if text.is_mirrored { 1 } else { 0 })?;
         w.write_i32(text.stroke_width.to_raw())?;
 
-        w.write_i16(0)?;
-        w.write_u8(0)?;
+        w.write_u8(if text.is_comment { 1 } else { 0 })?;
+        w.write_u8(if text.is_designator { 1 } else { 0 })?;
+        w.write_u8(0)?; // ext
         w.write_u8(i32::from(text.text_kind) as u8)?;
         w.write_u8(if text.font_bold { 1 } else { 0 })?;
         w.write_u8(if text.font_italic { 1 } else { 0 })?;

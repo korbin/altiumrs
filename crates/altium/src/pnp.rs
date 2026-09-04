@@ -62,7 +62,7 @@ pub fn pnp_entries(doc: &Document, absolute: bool, include_no_bom: bool) -> Vec<
                 || (include_no_bom && c.component_kind == KIND_STANDARD_NO_BOM)
         })
         .map(|c| PnpEntry {
-            designator: c.source_designator.clone().unwrap_or_default(),
+            designator: crate::netlist::pcb_designator(c),
             comment: c
                 .comment
                 .clone()

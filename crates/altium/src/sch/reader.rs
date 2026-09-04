@@ -420,6 +420,10 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
             | Some(SchRecordType::BusEntry)
             | Some(SchRecordType::Blanket)
             | Some(SchRecordType::ParameterSet)
+            | Some(SchRecordType::HarnessConnector)
+            | Some(SchRecordType::HarnessEntry)
+            | Some(SchRecordType::HarnessType)
+            | Some(SchRecordType::SignalHarness)
             | Some(SchRecordType::Component) => false,
             None => false,
         };
@@ -542,6 +546,11 @@ impl Document {
         if let Some(data) = cf.try_read_stream("FileHeader")? {
             read_document_records(&mut document, &data)?;
         }
+        // Altium parks harness connectors (215-217) and signal harnesses
+        // (218) in a second record stream with its own header block.
+        if let Some(data) = cf.try_read_stream("Additional")? {
+            read_record_stream(&mut document, &data, true)?;
+        }
 
         let entries = cf.list_children("/")?;
         for entry in entries {
@@ -587,6 +596,13 @@ impl Document {
 }
 
 fn read_document_records(document: &mut Document, data: &[u8]) -> Result<()> {
+    read_record_stream(document, data, false)
+}
+
+/// Dispatch one record stream into `document`. `additional` selects the
+/// `Additional` stream, whose header block is kept separately so it can be
+/// written back with its own record count.
+fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) -> Result<()> {
     let mut br = BinaryReader::new(Cursor::new(data.to_vec()))?;
     let mut current_component: Option<usize> = None;
     let mut current_implementation: Option<(usize, usize)> = None; // (component_idx, impl_idx)
@@ -761,6 +777,28 @@ fn read_document_records(document: &mut Document, data: &[u8]) -> Result<()> {
             Some(SchRecordType::Port) => {
                 document.ports.push(codec::port_from_params(&params));
             }
+            Some(SchRecordType::HarnessConnector) => {
+                document
+                    .harness_connectors
+                    .push(codec::harness_connector_from_params(&params));
+            }
+            Some(SchRecordType::HarnessEntry) => {
+                // Entries follow their connector, like sheet entries follow
+                // their sheet symbol.
+                match document.harness_connectors.last_mut() {
+                    Some(parent) => parent.entries.push(codec::harness_entry_from_params(&params)),
+                    None => handled = false,
+                }
+            }
+            Some(SchRecordType::HarnessType) => match document.harness_connectors.last_mut() {
+                Some(parent) => parent.harness_type = Some(codec::harness_type_from_params(&params)),
+                None => handled = false,
+            },
+            Some(SchRecordType::SignalHarness) => {
+                document
+                    .signal_harnesses
+                    .push(codec::signal_harness_from_params(&params));
+            }
             Some(SchRecordType::NoErc) => {
                 document.no_ercs.push(codec::no_erc_from_params(&params));
             }
@@ -848,11 +886,25 @@ fn read_document_records(document: &mut Document, data: &[u8]) -> Result<()> {
         }
     }
 
-    document.header_parameters = header_parameters;
-    document.sheet_settings = sheet_settings;
-    document.template_record = template_record;
-    document.sheet_name_annotations = sheet_name_annotations;
-    document.sheet_filename_annotations = sheet_filename_annotations;
+    if additional {
+        document.additional_header_parameters = header_parameters;
+        if sheet_settings.is_some() {
+            document.sheet_settings = sheet_settings;
+        }
+        if template_record.is_some() {
+            document.template_record = template_record;
+        }
+        document.sheet_name_annotations.extend(sheet_name_annotations);
+        document
+            .sheet_filename_annotations
+            .extend(sheet_filename_annotations);
+    } else {
+        document.header_parameters = header_parameters;
+        document.sheet_settings = sheet_settings;
+        document.template_record = template_record;
+        document.sheet_name_annotations = sheet_name_annotations;
+        document.sheet_filename_annotations = sheet_filename_annotations;
+    }
     Ok(())
 }
 

@@ -45,6 +45,6 @@ pub use intlib::{
     serialise_parameters_bin,
 };
 pub use netlist::{
-    NetConnection, Netlist, NetlistComponent, NetlistNet, NetlistSource,
+    NetConnection, Netlist, NetlistComponent, NetlistNet, NetlistSource, PORT_DESIGNATOR, SchNetlistOptions,
 };
 pub use libpkg::{DocumentReference, LibraryPackage, SplitResult};

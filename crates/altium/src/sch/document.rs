@@ -7,9 +7,9 @@ use serde::{Deserialize, Serialize};
 
 use super::component::Component;
 use super::primitives::{
-    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, Image, Junction, Label, Line,
-    NetLabel, NoErc, Parameter, ParameterSet, Pie, Polygon, Polyline, Port, PowerObject, Rectangle,
-    RoundedRectangle, SheetEntry, SheetSymbol, Symbol, TextFrame, Wire,
+    Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, HarnessConnector, Image, Junction,
+    Label, Line, NetLabel, NoErc, Parameter, ParameterSet, Pie, Polygon, Polyline, Port, PowerObject,
+    Rectangle, RoundedRectangle, SheetEntry, SheetSymbol, SignalHarness, Symbol, TextFrame, Wire,
 };
 use crate::coord::CoordRect;
 use crate::diagnostic::Diagnostic;
@@ -48,9 +48,20 @@ pub struct Document {
     pub sheet_entries: Vec<SheetEntry>,
     pub blankets: Vec<Blanket>,
     pub parameter_sets: Vec<ParameterSet>,
+    /// Harness connectors (RECORD=215) with their entries (216) and type
+    /// label (217) attached.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub harness_connectors: Vec<HarnessConnector>,
+    /// Signal harness polylines (RECORD=218).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub signal_harnesses: Vec<SignalHarness>,
 
     /// Header parameters (page size, fonts, grid, etc.).
     pub header_parameters: Option<BTreeMap<String, String>>,
+    /// Header block of the `Additional` stream, which carries harness
+    /// connectors / signal harnesses; `Weight` there is the record count.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub additional_header_parameters: Option<BTreeMap<String, String>>,
     /// Sheet settings record (RECORD=31) preserved verbatim.
     pub sheet_settings: Option<BTreeMap<String, String>>,
     /// Template-file reference (RECORD=39): pre-component sheet-level record.

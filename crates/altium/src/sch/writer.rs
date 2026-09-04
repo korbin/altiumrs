@@ -689,6 +689,52 @@ impl Document {
 
         cf.write_stream("FileHeader", &buf.into_inner())?;
 
+        // Harness connectors (215) with their entries (216) / type label
+        // (217) and signal harnesses (218) live in the separate `Additional`
+        // stream, behind a header whose `Weight` is the record count.
+        if self.additional_header_parameters.is_some()
+            || !self.harness_connectors.is_empty()
+            || !self.signal_harnesses.is_empty()
+        {
+            let mut abuf = Cursor::new(Vec::<u8>::new());
+            {
+                let mut abw = BinaryWriter::new(&mut abuf);
+                let count: usize = self
+                    .harness_connectors
+                    .iter()
+                    .map(|hc| 1 + hc.entries.len() + usize::from(hc.harness_type.is_some()))
+                    .sum::<usize>()
+                    + self.signal_harnesses.len();
+                let mut header = ParameterMap::new();
+                match &self.additional_header_parameters {
+                    Some(h) => {
+                        for (k, v) in h {
+                            header.insert(k, v.clone());
+                        }
+                    }
+                    None => header.insert(
+                        "HEADER",
+                        "Protel for Windows - Schematic Capture Binary File Version 5.0",
+                    ),
+                }
+                header.insert("Weight", count.to_string());
+                emit_param_record(&mut abw, &header)?;
+                for hc in &self.harness_connectors {
+                    emit_typed(&mut abw, "215", |p| codec::harness_connector_to_params(hc, p))?;
+                    for entry in &hc.entries {
+                        emit_typed(&mut abw, "216", |p| codec::harness_entry_to_params(entry, p))?;
+                    }
+                    if let Some(ht) = &hc.harness_type {
+                        emit_typed(&mut abw, "217", |p| codec::harness_type_to_params(ht, p))?;
+                    }
+                }
+                for sh in &self.signal_harnesses {
+                    emit_typed(&mut abw, "218", |p| codec::signal_harness_to_params(sh, p))?;
+                }
+            }
+            cf.write_stream("Additional", &abuf.into_inner())?;
+        }
+
         for (path, data) in &self.additional_streams {
             cf.write_stream(path, data)?;
         }

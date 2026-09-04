@@ -8,6 +8,7 @@ use super::binary::{coord_from_dxp_frac, coord_to_dxp_frac, line_width_from_inde
 use super::component::Component;
 use super::implementation::{Implementation, MapDefiner};
 use super::primitives::{
+    HarnessConnector, HarnessEntry, HarnessType, SignalHarness,
     Arc, Bezier, Blanket, Bus, BusEntry, Ellipse, EllipticalArc, Image, Junction, Label, Line,
     NetLabel, NoErc, Parameter, ParameterSet, Pie, Pin, Polygon, Polyline, Port, PowerObject,
     PrimitiveCommon, Rectangle, RoundedRectangle, SheetEntry, SheetSymbol, Symbol, TextFrame, Wire,
@@ -1487,7 +1488,10 @@ pub fn sheet_entry_from_params(params: &ParameterMap) -> SheetEntry {
     let d = dto::SheetEntryDto::from_params(params);
     SheetEntry {
         side: d.side,
-        distance_from_top: coord_from_dxp_frac(d.distance_from_top, 0),
+        distance_from_top: entry_distance_from_slots(
+            d.distance_from_top,
+            params.get_i32("DISTANCEFROMTOP_FRAC").unwrap_or(0),
+        ),
         name: d.name.clone().unwrap_or_default(),
         io_type: d.io_type,
         style: d.style,
@@ -1506,8 +1510,7 @@ pub fn sheet_entry_from_params(params: &ParameterMap) -> SheetEntry {
 pub fn sheet_entry_to_params(e: &SheetEntry, params: &mut ParameterMap) {
     let mut d = dto::SheetEntryDto::default();
     d.side = e.side;
-    let (dft, _) = coord_to_dxp_frac(e.distance_from_top);
-    d.distance_from_top = dft;
+    d.distance_from_top = entry_slots_from_distance(e.distance_from_top);
     d.name = if e.name.is_empty() {
         None
     } else {
@@ -1739,4 +1742,157 @@ fn write_common_to_params(params: &mut ParameterMap, c: &PrimitiveCommon) {
     if let Some(uid) = &c.unique_id {
         params.insert("UNIQUEID", uid.clone());
     }
+}
+
+// Sheet-entry / harness-entry slot geometry
+
+/// `DISTANCEFROMTOP` on sheet entries (16) and harness entries (216) counts
+/// 100-mil grid slots below the owner's top edge, not DXP units: slot 1 is
+/// one grid (10 DXP) down. Verified against wire endpoints on real sheets.
+pub const ENTRY_SLOT_DXP: i32 = 10;
+
+fn entry_distance_from_slots(slots: i32, frac: i32) -> Coord {
+    coord_from_dxp_frac(slots.wrapping_mul(ENTRY_SLOT_DXP), frac)
+}
+
+fn entry_slots_from_distance(d: Coord) -> i32 {
+    let (dxp, _) = coord_to_dxp_frac(d);
+    dxp / ENTRY_SLOT_DXP
+}
+
+// Harness connector (215) / harness entry (216) / harness type (217)
+
+pub fn harness_connector_from_params(params: &ParameterMap) -> HarnessConnector {
+    let d = dto::HarnessConnectorDto::from_params(params);
+    HarnessConnector {
+        entries: Vec::new(),
+        harness_type: None,
+        location: CoordPoint::new(
+            coord_from_dxp_frac(d.location_x, d.location_x_frac),
+            coord_from_dxp_frac(d.location_y, d.location_y_frac),
+        ),
+        x_size: coord_from_dxp_frac(d.x_size, 0),
+        y_size: coord_from_dxp_frac(d.y_size, 0),
+        primary_connection_position: coord_from_dxp_frac(d.primary_connection_position, 0),
+        side: d.harness_connector_side,
+        line_width: d.line_width,
+        color: d.color,
+        area_color: d.area_color,
+        common: d.extract_common(),
+    }
+}
+
+pub fn harness_connector_to_params(h: &HarnessConnector, params: &mut ParameterMap) {
+    let mut d = dto::HarnessConnectorDto::default();
+    let (lx, lxf) = coord_to_dxp_frac(h.location.x);
+    let (ly, lyf) = coord_to_dxp_frac(h.location.y);
+    d.location_x = lx;
+    d.location_x_frac = lxf;
+    d.location_y = ly;
+    d.location_y_frac = lyf;
+    d.x_size = coord_to_dxp_frac(h.x_size).0;
+    d.y_size = coord_to_dxp_frac(h.y_size).0;
+    d.primary_connection_position = coord_to_dxp_frac(h.primary_connection_position).0;
+    d.harness_connector_side = h.side;
+    d.line_width = h.line_width;
+    d.color = h.color;
+    d.area_color = h.area_color;
+    d.apply_common_from(&h.common);
+    d.to_params(params);
+}
+
+pub fn harness_entry_from_params(params: &ParameterMap) -> HarnessEntry {
+    let d = dto::HarnessEntryDto::from_params(params);
+    HarnessEntry {
+        side: d.side,
+        distance_from_top: entry_distance_from_slots(d.distance_from_top, d.distance_from_top_frac),
+        name: d.name.clone().unwrap_or_default(),
+        color: d.color,
+        area_color: d.area_color,
+        text_color: d.text_color,
+        text_font_id: d.text_font_id,
+        text_style: d.text_style.clone(),
+        owner_index_additional_list: d.owner_index_additional_list,
+        common: d.extract_common(),
+    }
+}
+
+pub fn harness_entry_to_params(e: &HarnessEntry, params: &mut ParameterMap) {
+    let mut d = dto::HarnessEntryDto::default();
+    d.owner_index_additional_list = e.owner_index_additional_list;
+    d.side = e.side;
+    d.distance_from_top = entry_slots_from_distance(e.distance_from_top);
+    d.name = if e.name.is_empty() {
+        None
+    } else {
+        Some(e.name.clone())
+    };
+    d.color = e.color;
+    d.area_color = e.area_color;
+    d.text_color = e.text_color;
+    d.text_font_id = e.text_font_id;
+    d.text_style = e.text_style.clone();
+    d.apply_common_from(&e.common);
+    d.to_params(params);
+}
+
+pub fn harness_type_from_params(params: &ParameterMap) -> HarnessType {
+    let d = dto::HarnessTypeDto::from_params(params);
+    HarnessType {
+        location: CoordPoint::new(
+            coord_from_dxp_frac(d.location_x, d.location_x_frac),
+            coord_from_dxp_frac(d.location_y, d.location_y_frac),
+        ),
+        text: d.text.clone().unwrap_or_default(),
+        color: d.color,
+        font_id: d.font_id,
+        is_hidden: d.is_hidden,
+        not_auto_position: d.not_auto_position,
+        owner_index_additional_list: d.owner_index_additional_list,
+        common: d.extract_common(),
+    }
+}
+
+pub fn harness_type_to_params(t: &HarnessType, params: &mut ParameterMap) {
+    let mut d = dto::HarnessTypeDto::default();
+    d.owner_index_additional_list = t.owner_index_additional_list;
+    let (lx, lxf) = coord_to_dxp_frac(t.location.x);
+    let (ly, lyf) = coord_to_dxp_frac(t.location.y);
+    d.location_x = lx;
+    d.location_x_frac = lxf;
+    d.location_y = ly;
+    d.location_y_frac = lyf;
+    d.text = if t.text.is_empty() {
+        None
+    } else {
+        Some(t.text.clone())
+    };
+    d.color = t.color;
+    d.font_id = t.font_id;
+    d.is_hidden = t.is_hidden;
+    d.not_auto_position = t.not_auto_position;
+    d.apply_common_from(&t.common);
+    d.to_params(params);
+}
+
+// Signal harness (218)
+
+pub fn signal_harness_from_params(params: &ParameterMap) -> SignalHarness {
+    let d = dto::SignalHarnessDto::from_params(params);
+    SignalHarness {
+        vertices: read_vertices(params, d.location_count, 10),
+        color: d.color,
+        line_width: d.line_width,
+        common: d.extract_common(),
+    }
+}
+
+pub fn signal_harness_to_params(s: &SignalHarness, params: &mut ParameterMap) {
+    let mut d = dto::SignalHarnessDto::default();
+    d.color = s.color;
+    d.line_width = s.line_width;
+    d.location_count = s.vertices.len() as i32;
+    d.apply_common_from(&s.common);
+    d.to_params(params);
+    write_vertices(params, &s.vertices);
 }

@@ -65,7 +65,8 @@ enum Command {
     },
     /// Extract the netlist from a `.PcbDoc` or `.SchDoc`. PCB extraction is
     /// explicit (each pad carries its net name); SchDoc extraction traces
-    /// the wire graph and uses net labels / power ports for naming.
+    /// the wire graph and names nets from net labels, power ports, ports and
+    /// harness-connector entries (`<port>.<entry>`).
     Netlist {
         /// Source `.PcbDoc` or `.SchDoc`.
         path: PathBuf,
@@ -76,6 +77,17 @@ enum Command {
         /// or `csv`.
         #[arg(long, default_value = "protel")]
         format: String,
+        /// SchDoc only: also emit every sheet-symbol entry as a connection
+        /// (designator = sheet symbol name, pad = entry name) so a parent
+        /// sheet's netlist shows which child entries are wired together.
+        #[arg(long)]
+        sheet_entries: bool,
+        /// SchDoc only: also emit every port a net touches as a
+        /// pseudo-connection (designator `PORT`, pad = port name; harness
+        /// entries as `<bundle>.<entry>`), for binding child-sheet nets to
+        /// the parent's sheet entries.
+        #[arg(long)]
+        ports: bool,
     },
     /// Export a `.BomDoc` to CSV (default) or JSON. One row per CatalogItem
     /// with the common BOM columns.
@@ -249,7 +261,9 @@ async fn main() -> Result<()> {
             path,
             output,
             format,
-        } => cmd_netlist(&path, output.as_deref(), &format).await,
+            sheet_entries,
+            ports,
+        } => cmd_netlist(&path, output.as_deref(), &format, sheet_entries, ports).await,
         Command::Bom {
             path,
             output,
@@ -1098,12 +1112,20 @@ async fn cmd_netlist(
     path: &Path,
     output: Option<&Path>,
     format: &str,
+    sheet_entries: bool,
+    ports: bool,
 ) -> Result<()> {
-    use altium::Netlist;
+    use altium::{Netlist, SchNetlistOptions};
     let file = AltiumFile::read(path).await?;
     let netlist = match file {
         AltiumFile::PcbDocument(doc) => Netlist::from_pcb_document(&doc),
-        AltiumFile::SchDocument(doc) => Netlist::from_sch_document(&doc),
+        AltiumFile::SchDocument(doc) => Netlist::from_sch_document_with(
+            &doc,
+            &SchNetlistOptions {
+                include_sheet_entries: sheet_entries,
+                include_ports: ports,
+            },
+        ),
         other => {
             return Err(anyhow!(
                 "netlist requires .PcbDoc or .SchDoc; got {}",
