@@ -1575,3 +1575,116 @@ fn pcblib_records_split_and_lint_cleanly() {
     assert_eq!(step_checksum(b"AB"), 65 + 66);
     assert_eq!(step_checksum(b"ABC"), 65 + 66 + 2 * 67);
 }
+
+#[test]
+fn pcblib_guid_tables_follow_the_records() {
+    use altium::pcb::lint::check_pcblib;
+    use altium::pcb::Arc;
+    let mut comp = pcb::Component::new("IDS");
+    for d in ["1", "2"] {
+        let mut pad = pcb::Pad::default();
+        pad.designator = Some(d.into());
+        pad.unique_id = Some(format!("PAD{d}PAD{d}"));
+        comp.pads.push(pad);
+    }
+    let mut lib = pcb::Library::default();
+    lib.unique_id = "AAAAAAAA".into();
+    lib.components.push(comp);
+    let file = lib.to_bytes().unwrap();
+    // tables are generated, consistent, and the ids come back on the pads
+    let mut cf = altium::compound::CompoundFile::open(file.clone()).unwrap();
+    assert!(check_pcblib(&mut cf).unwrap().is_empty());
+    let ids = pcb_stream(&file, "IDS/UniqueIDPrimitiveInformation/Data");
+    assert!(pcb_bytes_contain(&ids, b"|PRIMITIVEINDEX=0|PRIMITIVEOBJECTID=Pad|UNIQUEID=PAD1PAD1\0"));
+    assert!(pcb_bytes_contain(&ids, b"|PRIMITIVEINDEX=1|PRIMITIVEOBJECTID=Pad|UNIQUEID=PAD2PAD2\0"));
+    let mut parsed = pcb::Library::from_bytes(file).unwrap();
+    let c = &parsed.components[0];
+    assert_eq!(c.pads[1].unique_id.as_deref(), Some("PAD2PAD2"));
+    assert!(c.guid.is_some() && c.pads[0].guid.is_some());
+    assert!(!c.additional_streams.keys().any(|k| k.starts_with("PrimitiveGuids") || k.starts_with("UniqueIDPrimitiveInformation")));
+    let guid0 = c.pads[0].guid.clone();
+    // insert an arc in front of the pads: the pad table must follow the new indices
+    let mut arc = Arc::default();
+    arc.radius = Coord::from_mils(5.0);
+    parsed.components[0].arcs.push(arc);
+    parsed.components[0].primitive_order.insert(0, 1);
+    let file2 = parsed.to_bytes().unwrap();
+    let ids = pcb_stream(&file2, "IDS/UniqueIDPrimitiveInformation/Data");
+    assert!(pcb_bytes_contain(&ids, b"|PRIMITIVEINDEX=1|PRIMITIVEOBJECTID=Pad|UNIQUEID=PAD1PAD1\0"));
+    assert!(pcb_bytes_contain(&ids, b"|PRIMITIVEINDEX=2|PRIMITIVEOBJECTID=Pad|UNIQUEID=PAD2PAD2\0"));
+    let mut cf = altium::compound::CompoundFile::open(file2.clone()).unwrap();
+    assert!(check_pcblib(&mut cf).unwrap().is_empty());
+    let again = pcb::Library::from_bytes(file2).unwrap();
+    assert_eq!(again.components[0].pads[0].guid, guid0, "existing GUIDs are kept");
+    assert_eq!(again.components[0].pads[0].unique_id.as_deref(), Some("PAD1PAD1"));
+}
+
+#[test]
+fn pcblib_side_tables_follow_the_records() {
+    use altium::pcb::lint::check_pcblib;
+    use altium::pcb::primitives::ExtendedEntry;
+    use altium::pcb::{Arc, Region};
+    let mut comp = pcb::Component::new("SIDE");
+    for d in ["1", "2"] {
+        let mut pad = pcb::Pad::default();
+        pad.designator = Some(d.into());
+        pad.unique_id = Some(format!("PAD{d}PAD{d}"));
+        pad.extended.push(ExtendedEntry {
+            stream: "CornerRadiusChamfer".into(),
+            text: format!("|SCR0.LAYER=TOP|SCR0.CRSIZE=19685|PRIMITIVEINDEX=9"),
+            seq: 0,
+        });
+        comp.pads.push(pad);
+    }
+    comp.pads[1].extended.push(ExtendedEntry {
+        stream: "CustomShapes".into(),
+        text: "|PRIMITIVEINDEX=0|S0.LAYER=TOP|S0.XSIZE=78740".into(),
+        seq: 0,
+    });
+    let mut region = Region::default();
+    region.layer = 1;
+    region.outline = vec![
+        CoordPoint::new(Coord::from_mils(0.0), Coord::from_mils(0.0)),
+        CoordPoint::new(Coord::from_mils(10.0), Coord::from_mils(0.0)),
+        CoordPoint::new(Coord::from_mils(10.0), Coord::from_mils(10.0)),
+    ];
+    region.pad_ref = Some(1);
+    region.extended.push(ExtendedEntry {
+        stream: "ExtendedPrimitiveInformation".into(),
+        text: "|PRIMITIVEINDEX=0|PRIMITIVEOBJECTID=Region|TYPE=Mask".into(),
+        seq: 0,
+    });
+    comp.regions.push(region);
+    let mut lib = pcb::Library::default();
+    lib.unique_id = "AAAAAAAA".into();
+    lib.components.push(comp);
+    let file = lib.to_bytes().unwrap();
+    let mut cf = altium::compound::CompoundFile::open(file.clone()).unwrap();
+    assert!(check_pcblib(&mut cf).unwrap().is_empty());
+    let crc = pcb_stream(&file, "SIDE/CornerRadiusChamfer");
+    assert_eq!(&crc[..4], &2u32.to_le_bytes());
+    assert!(pcb_bytes_contain(&crc, b"|SCR0.LAYER=TOP|SCR0.CRSIZE=19685|PRIMITIVEINDEX=0\0"));
+    assert!(pcb_bytes_contain(&crc, b"|SCR0.LAYER=TOP|SCR0.CRSIZE=19685|PRIMITIVEINDEX=1\0"));
+    assert!(pcb_bytes_contain(&pcb_stream(&file, "SIDE/CustomShapes"), b"|PRIMITIVEINDEX=1|S0.LAYER=TOP"));
+    assert!(pcb_bytes_contain(&pcb_stream(&file, "SIDE/ExtendedPrimitiveInformation/Data"), b"|PRIMITIVEINDEX=2|PRIMITIVEOBJECTID=Region"));
+    assert_eq!(pcb_stream(&file, "SIDE/ExtendedPrimitiveInformation/Header"), 1u32.to_le_bytes());
+    assert!(pcb_bytes_contain(&pcb_stream(&file, "SIDE/Data"), b"PADINDEX=2"));
+    // read back, put an arc in front of the pads, write again: every index moves by one
+    let mut parsed = pcb::Library::from_bytes(file).unwrap();
+    let c = &parsed.components[0];
+    assert_eq!(c.pads[1].extended.len(), 2);
+    assert_eq!(c.regions[0].pad_ref, Some(1));
+    assert!(!c.additional_streams.keys().any(|k| k.contains("CornerRadius") || k.contains("CustomShapes") || k.contains("ExtendedPrimitive")));
+    let mut arc = Arc::default();
+    arc.radius = Coord::from_mils(5.0);
+    parsed.components[0].arcs.push(arc);
+    parsed.components[0].primitive_order.insert(0, 1);
+    let file2 = parsed.to_bytes().unwrap();
+    let crc = pcb_stream(&file2, "SIDE/CornerRadiusChamfer");
+    assert!(pcb_bytes_contain(&crc, b"|PRIMITIVEINDEX=1\0") && pcb_bytes_contain(&crc, b"|PRIMITIVEINDEX=2\0"));
+    assert!(pcb_bytes_contain(&pcb_stream(&file2, "SIDE/CustomShapes"), b"|PRIMITIVEINDEX=2|"));
+    assert!(pcb_bytes_contain(&pcb_stream(&file2, "SIDE/ExtendedPrimitiveInformation/Data"), b"|PRIMITIVEINDEX=3|"));
+    assert!(pcb_bytes_contain(&pcb_stream(&file2, "SIDE/Data"), b"PADINDEX=3"));
+    let mut cf = altium::compound::CompoundFile::open(file2).unwrap();
+    assert!(check_pcblib(&mut cf).unwrap().is_empty());
+}

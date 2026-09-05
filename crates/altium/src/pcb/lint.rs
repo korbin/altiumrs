@@ -54,7 +54,7 @@ fn expected_len(kind: u8) -> Option<usize> {
 
 fn guid_type_code(kind: u8) -> Option<u32> {
     match kind {
-        1 | 2 | 4 | 5 => Some(u32::from(kind)),
+        1..=6 => Some(u32::from(kind)),
         11 => Some(89),
         12 => Some(90),
         _ => None,
@@ -235,6 +235,133 @@ pub fn check_pcblib(cf: &mut CompoundFile) -> Result<Vec<Problem>> {
                     if n != rows {
                         problems.push(problem(format!("PrimitiveGuids/Header says {n} rows, Data has {rows}")));
                     }
+                }
+            }
+        }
+
+        // Pad unique ids: one entry per pad, by record index, ascending.
+        if let Some(u) = cf.try_read_stream(format!("{key}/UniqueIDPrimitiveInformation/Data"))? {
+            let mut p = 0;
+            let mut n = 0usize;
+            let mut last: Option<usize> = None;
+            let mut seen = std::collections::BTreeSet::new();
+            while p + 4 <= u.len() {
+                let len = u32_at(&u, p).unwrap_or(0) as usize;
+                let entry = &u[(p + 4).min(u.len())..(p + 4 + len).min(u.len())];
+                p += 4 + len;
+                n += 1;
+                let entry = entry.strip_suffix(&[0]).unwrap_or(entry);
+                let idx = param_value(entry, "PRIMITIVEINDEX").and_then(|v| crate::encoding::decode(v).trim().parse::<usize>().ok());
+                let obj = param_value(entry, "PRIMITIVEOBJECTID").map(crate::encoding::decode).unwrap_or_default();
+                match idx {
+                    Some(i) if records.get(i).map(|r| r.kind) == Some(2) && obj == "Pad" => {
+                        if last.map(|l| i <= l).unwrap_or(false) {
+                            problems.push(problem(format!("UniqueIDPrimitiveInformation entry {n} (record {i}) is out of order")));
+                        }
+                        last = Some(i);
+                        seen.insert(i);
+                    }
+                    Some(i) => problems.push(problem(format!(
+                        "UniqueIDPrimitiveInformation entry {n} points at record {i}, which is {} not a {obj}",
+                        records.get(i).map(|r| kind_name(r.kind)).unwrap_or("missing"),
+                    ))),
+                    None => problems.push(problem(format!("UniqueIDPrimitiveInformation entry {n} has no PRIMITIVEINDEX"))),
+                }
+            }
+            let pads = records.iter().filter(|r| r.kind == 2).count();
+            if n > 0 && seen.len() != pads {
+                problems.push(problem(format!("UniqueIDPrimitiveInformation covers {} of {pads} pads", seen.len())));
+            }
+            if let Some(h) = cf.try_read_stream(format!("{key}/UniqueIDPrimitiveInformation/Header"))? {
+                let hn = u32_at(&h, 0).unwrap_or(0) as usize;
+                if hn != n {
+                    problems.push(problem(format!("UniqueIDPrimitiveInformation/Header says {hn} entries, Data has {n}")));
+                }
+            }
+        }
+
+        // Side tables keyed by record index.
+        let mut side: Vec<(&str, Vec<u8>, bool)> = Vec::new();
+        for name in ["CornerRadiusChamfer", "CustomShapes", "SharedUnion"] {
+            if let Some(d) = cf.try_read_stream(format!("{key}/{name}"))? {
+                side.push((name, d, true));
+            }
+        }
+        if let Some(d) = cf.try_read_stream(format!("{key}/ExtendedPrimitiveInformation/Data"))? {
+            side.push(("ExtendedPrimitiveInformation", d, false));
+        }
+        for (name, data, inline) in side {
+            let mut p = if inline { 4 } else { 0 };
+            let mut n = 0usize;
+            while p + 4 <= data.len() {
+                let len = u32_at(&data, p).unwrap_or(0) as usize;
+                let entry = &data[(p + 4).min(data.len())..(p + 4 + len).min(data.len())];
+                p += 4 + len;
+                n += 1;
+                let entry = entry.strip_suffix(&[0]).unwrap_or(entry);
+                let idx = param_value(entry, "PRIMITIVEINDEX").and_then(|v| crate::encoding::decode(v).trim().parse::<usize>().ok());
+                let obj = param_value(entry, "PRIMITIVEOBJECTID")
+                    .or_else(|| param_value(entry, "OBJECTID"))
+                    .map(crate::encoding::decode);
+                let want: Option<u8> = match obj.as_deref() {
+                    Some("Pad") => Some(2),
+                    Some("Region") => Some(11),
+                    Some("Track") => Some(4),
+                    Some("Arc") => Some(1),
+                    Some("Text") => Some(5),
+                    Some("Fill") => Some(6),
+                    Some("Via") => Some(3),
+                    Some("ComponentBody") => Some(12),
+                    Some(_) => None,
+                    None => if name == "CornerRadiusChamfer" || name == "CustomShapes" { Some(2) } else { None },
+                };
+                match idx {
+                    None => problems.push(problem(format!("{name} entry {n} has no PRIMITIVEINDEX"))),
+                    Some(i) => match records.get(i) {
+                        None => problems.push(problem(format!("{name} entry {n} points at record {i}, past the end"))),
+                        Some(r) => {
+                            if let Some(w) = want {
+                                if r.kind != w {
+                                    problems.push(problem(format!(
+                                        "{name} entry {n} points at record {i}, which is {} not {}",
+                                        kind_name(r.kind),
+                                        obj.as_deref().unwrap_or("a pad")
+                                    )));
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+            if inline {
+                let c = u32_at(&data, 0).unwrap_or(0) as usize;
+                if c != n {
+                    problems.push(problem(format!("{name} count says {c}, has {n} entries")));
+                }
+            } else if let Some(h) = cf.try_read_stream(format!("{key}/ExtendedPrimitiveInformation/Header"))? {
+                let c = u32_at(&h, 0).unwrap_or(0) as usize;
+                if c != n {
+                    problems.push(problem(format!("ExtendedPrimitiveInformation/Header says {c}, Data has {n} entries")));
+                }
+            }
+        }
+        // Regions attached to a pad name it by 1-based record ordinal.
+        for (i, r) in records.iter().enumerate() {
+            if r.kind != 11 {
+                continue;
+            }
+            let body = r.main_block();
+            let Some(plen) = body.get(18..22).map(|b| u32::from_le_bytes(b.try_into().unwrap()) as usize) else { continue };
+            let params = body.get(22..22 + plen).unwrap_or(&[]);
+            let params = params.strip_suffix(&[0]).unwrap_or(params);
+            if let Some(v) = param_value(params, "PADINDEX") {
+                match crate::encoding::decode(v).trim().parse::<usize>().ok().and_then(|n| n.checked_sub(1)) {
+                    Some(t) if records.get(t).map(|x| x.kind) == Some(2) => {}
+                    other => problems.push(problem(format!(
+                        "region {i} PADINDEX points at record {:?}, which is {}",
+                        other.map(|t| t + 1),
+                        other.and_then(|t| records.get(t)).map(|x| kind_name(x.kind)).unwrap_or("missing")
+                    ))),
                 }
             }
         }

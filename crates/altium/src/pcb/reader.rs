@@ -336,6 +336,9 @@ fn read_footprint(
         }
     }
 
+    let order = component.primitive_order.clone();
+    super::guids::absorb_tables(&mut component, &order);
+
     Ok(Some(component))
 }
 

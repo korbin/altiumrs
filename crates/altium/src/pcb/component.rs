@@ -72,6 +72,9 @@ pub struct Component {
     pub tear_drop: bool,
     pub union_index: i32,
     pub unique_id: Option<String>,
+    /// GUID of the footprint itself (row 0 of its `PrimitiveGuids` table).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
     pub user_routed: bool,
     pub vault_guid: Option<String>,
     pub x: Coord,

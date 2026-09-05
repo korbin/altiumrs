@@ -9,6 +9,7 @@ pub mod document;
 pub mod embedded;
 pub(crate) mod flatten;
 pub mod geometry;
+pub mod guids;
 pub mod layer;
 pub mod library;
 pub mod model3d;

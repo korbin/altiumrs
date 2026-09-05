@@ -218,43 +218,45 @@ fn write_footprint(cf: &mut CompoundFile, component: &Component, section_key: &s
     write_footprint_parameters(cf, component, section_key)?;
     write_footprint_wide_strings(cf, component, section_key)?;
     write_footprint_data(cf, component, section_key)?;
-    write_default_footprint_stubs(cf, component, section_key)?;
-    write_additional_streams(cf, section_key, &component.additional_streams)?;
+    write_footprint_guid_tables(cf, component, section_key)?;
+    let generated = super::guids::build_side_tables(component, &record_order(component));
+    // The two identity tables are regenerated above; a copy carried in from
+    // an older export would be stale.
+    let extra: BTreeMap<String, Vec<u8>> = component
+        .additional_streams
+        .iter()
+        .filter(|(k, _)| {
+            !k.starts_with("PrimitiveGuids/")
+                && !k.starts_with("UniqueIDPrimitiveInformation/")
+                && !generated.iter().any(|(g, _)| g == *k)
+        })
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    write_additional_streams(cf, section_key, &extra)?;
     Ok(())
 }
 
-/// Per-footprint `PrimitiveGuids` + `UniqueIDPrimitiveInformation` stubs:
-/// empty u32(0) header + zero-byte data.
-fn write_default_footprint_stubs(
+/// `PrimitiveGuids` and `UniqueIDPrimitiveInformation`, rebuilt from the
+/// primitives for the record order just written (see `guids.rs`).
+fn write_footprint_guid_tables(
     cf: &mut CompoundFile,
     component: &Component,
     section_key: &str,
 ) -> Result<()> {
-    // A footprint read from disk carries its own `PrimitiveGuids`; Altium does
-    // not always give such a footprint a `UniqueIDPrimitiveInformation`
-    // storage, so only a from-scratch footprint gets that stub.
-    let from_disk = component
-        .additional_streams
-        .keys()
-        .any(|k| k.starts_with("PrimitiveGuids/"));
-    for sub in ["PrimitiveGuids", "UniqueIDPrimitiveInformation"] {
-        if from_disk && sub == "UniqueIDPrimitiveInformation" {
-            continue;
-        }
-        let header_path = format!("{section_key}/{sub}/Header");
-        let data_path = format!("{section_key}/{sub}/Data");
-        if !component
-            .additional_streams
-            .contains_key(&format!("{sub}/Header"))
-        {
-            cf.write_stream(&header_path, &0u32.to_le_bytes())?;
-        }
-        if !component
-            .additional_streams
-            .contains_key(&format!("{sub}/Data"))
-        {
-            cf.write_stream(&data_path, &[])?;
-        }
+    let order = record_order(component);
+    let (guids, ids, count) = super::guids::build_tables(component, &order);
+    cf.write_stream(
+        format!("{section_key}/PrimitiveGuids/Header"),
+        &((order.len() as u32 + 1).to_le_bytes()),
+    )?;
+    cf.write_stream(format!("{section_key}/PrimitiveGuids/Data"), &guids)?;
+    cf.write_stream(
+        format!("{section_key}/UniqueIDPrimitiveInformation/Header"),
+        &count.to_le_bytes(),
+    )?;
+    cf.write_stream(format!("{section_key}/UniqueIDPrimitiveInformation/Data"), &ids)?;
+    for (stream, data) in super::guids::build_side_tables(component, &order) {
+        cf.write_stream(format!("{section_key}/{stream}"), &data)?;
     }
     Ok(())
 }
@@ -328,15 +330,10 @@ fn write_footprint_wide_strings(
     Ok(())
 }
 
-fn write_footprint_data(
-    cf: &mut CompoundFile,
-    component: &Component,
-    section_key: &str,
-) -> Result<()> {
-    let mut buf = Cursor::new(Vec::<u8>::new());
-    let mut bw = BinaryWriter::new(&mut buf);
-
-    bw.write_pascal_string_block(&component.name)?;
+/// The record order the `Data` stream is written in: the source file's
+/// interleaving when it is still consistent with the primitive lists,
+/// otherwise grouped by type in Altium's order.
+pub(crate) fn record_order(component: &Component) -> Vec<u8> {
 
     let counts = [
         component.arcs.len(),
@@ -369,6 +366,22 @@ fn write_footprint_data(
             .flat_map(|(id, n)| std::iter::repeat(*id).take(n))
             .collect()
     };
+    order
+}
+
+fn write_footprint_data(
+    cf: &mut CompoundFile,
+    component: &Component,
+    section_key: &str,
+) -> Result<()> {
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    let mut bw = BinaryWriter::new(&mut buf);
+
+    bw.write_pascal_string_block(&component.name)?;
+
+    let order = record_order(component);
+    let pad_ordinals = super::guids::pad_ordinals(&order);
+    let ids = [1u8, 2, 3, 4, 5, 6, 11, 12];
     let mut next = [0usize; 8];
     for id in order {
         let slot = ids.iter().position(|x| *x == id).unwrap();
@@ -382,7 +395,11 @@ fn write_footprint_data(
             4 => write_track(&mut bw, &component.tracks[i])?,
             5 => write_text(&mut bw, &component.texts[i], i as i32)?,
             6 => write_fill(&mut bw, &component.fills[i])?,
-            11 => write_region(&mut bw, &component.regions[i])?,
+            11 => {
+                let region = &component.regions[i];
+                let ordinal = region.pad_ref.and_then(|k| pad_ordinals.get(k).copied());
+                write_region(&mut bw, region, ordinal)?
+            }
             _ => write_component_body(&mut bw, &component.component_bodies[i])?,
         }
     }
@@ -1350,7 +1367,7 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
 /// typed fields, and append whatever followed the geometry unchanged.
 /// Returns `None` when the raw buffer doesn't parse (caller falls back to
 /// the structured writer).
-fn splice_region_raw(raw: &[u8], region: &Region) -> Option<Vec<u8>> {
+fn splice_region_raw(raw: &[u8], region: &Region, pad_ordinal: Option<usize>) -> Option<Vec<u8>> {
     if raw.len() < 22 {
         return None;
     }
@@ -1359,6 +1376,36 @@ fn splice_region_raw(raw: &[u8], region: &Region) -> Option<Vec<u8>> {
     if geo_start + 4 > raw.len() {
         return None;
     }
+    // A region that belongs to a pad names it by record ordinal; rewrite it
+    // for the order being emitted.
+    let raw_owned;
+    let raw = if let Some(ordinal) = pad_ordinal {
+        let params = &raw[22..geo_start];
+        let text = crate::encoding::decode(params.strip_suffix(&[0]).unwrap_or(params));
+        let rewritten: String = text
+            .split('|')
+            .map(|kv| {
+                if kv.to_ascii_uppercase().starts_with("PADINDEX=") {
+                    format!("{}={ordinal}", &kv[..8])
+                } else {
+                    kv.to_string()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let mut bytes = crate::encoding::encode(&rewritten);
+        bytes.push(0);
+        let mut b = raw[..18].to_vec();
+        b.extend_from_slice(&(bytes.len() as u32).to_le_bytes());
+        b.extend_from_slice(&bytes);
+        b.extend_from_slice(&raw[geo_start..]);
+        raw_owned = b;
+        &raw_owned[..]
+    } else {
+        raw
+    };
+    let plen = u32::from_le_bytes(raw[18..22].try_into().ok()?) as usize;
+    let geo_start = 22usize.checked_add(plen)?;
     // Walk the original geometry to find the residual tail.
     let mut off = geo_start;
     let read_u32 = |o: usize| -> Option<usize> {
@@ -1452,12 +1499,16 @@ fn splice_region_raw(raw: &[u8], region: &Region) -> Option<Vec<u8>> {
     Some(b)
 }
 
-fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> Result<()> {
+fn write_region<W: Write + Seek>(
+    bw: &mut BinaryWriter<W>,
+    region: &Region,
+    pad_ordinal: Option<usize>,
+) -> Result<()> {
     // Raw path: patched prefix + original params, with the geometry
     // (outline + holes) rebuilt from the typed fields and any residual
     // tail bytes preserved.
     if let Some(raw) = &region.raw_record {
-        if let Some(body) = splice_region_raw(raw, region) {
+        if let Some(body) = splice_region_raw(raw, region, pad_ordinal) {
             return bw.write_block(|w| {
                 w.write_bytes(&body)?;
                 Ok(())
@@ -1515,6 +1566,9 @@ fn write_region<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> R
         }
         if let Some(uid) = &region.unique_id {
             params.insert("UNIQUEID", uid.clone());
+        }
+        if let Some(ordinal) = pad_ordinal {
+            params.insert("PADINDEX", ordinal.to_string());
         }
         // Mask/relief/power-plane numeric parameters: only emit when
         // the field is non-default so we don't pollute regions that
@@ -2426,7 +2480,10 @@ write_doc_collection!(write_doc_pads, pads, "Pads6", 2, write_pad);
 write_doc_collection!(write_doc_vias, vias, "Vias6", 3, write_via);
 write_doc_collection!(write_doc_tracks, tracks, "Tracks6", 4, write_track);
 write_doc_collection!(write_doc_fills, fills, "Fills6", 6, write_fill);
-write_doc_collection!(write_doc_regions, regions, "Regions6", 11, write_region);
+fn write_region_doc<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> Result<()> {
+    write_region(bw, region, None)
+}
+write_doc_collection!(write_doc_regions, regions, "Regions6", 11, write_region_doc);
 write_doc_collection!(
     write_doc_component_bodies,
     component_bodies,

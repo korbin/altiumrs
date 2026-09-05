@@ -41,6 +41,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// List the raw records of one footprint's `Data` stream (kind, size,
+    /// layer, text) with the bytes of each record's main block in hex.
+    Records {
+        path: PathBuf,
+        /// Footprint name (its storage name when the two differ).
+        component: String,
+    },
+    /// Hex-dump one stream of a compound file.
+    Stream {
+        path: PathBuf,
+        /// Stream path inside the file, e.g. `XGL4040/WideStrings`.
+        stream: String,
+    },
     /// Check a `.PcbLib` for inconsistencies between its records and the
     /// tables Altium keeps next to them (header counts, primitive GUIDs, wide
     /// strings, the component TOC, embedded model checksums, legacy record
@@ -237,6 +250,8 @@ async fn main() -> Result<()> {
         Command::Dump { path } => cmd_dump(&path).await,
         Command::Diff { a, b, all, json } => cmd_diff(&a, &b, all, json).await,
         Command::Check { path, json } => cmd_check(&path, json).await,
+        Command::Records { path, component } => cmd_records(&path, &component).await,
+        Command::Stream { path, stream } => cmd_stream(&path, &stream).await,
         Command::Render {
             path,
             output,
@@ -1417,10 +1432,14 @@ async fn cmd_diff(a: &Path, b: &Path, all: bool, json: bool) -> Result<()> {
                     for (i, (x, y)) in ra.iter().zip(&rb).enumerate() {
                         if x != y {
                             *changed_by_kind.entry(kind_name(x.kind)).or_default() += 1;
+                            let fd = first_diff(&x.bytes, &y.bytes);
+                            let offsets: Vec<usize> = x.bytes.iter().zip(&y.bytes).enumerate().filter(|(_, (p, q))| p != q).map(|(i, _)| i).take(32).collect();
+                            let hex = |b: &[u8]| b[fd.min(b.len())..(fd + 16).min(b.len())].iter().map(|v| format!("{v:02x}")).collect::<String>();
                             changed.push(serde_json::json!({
-                                "index": i, "kind": kind_name(x.kind), "layer": x.layer(),
+                                "index": i, "kind": kind_name(x.kind), "layer": x.layer(), "layer_b": y.layer(),
                                 "text": x.text(), "len_a": x.bytes.len(), "len_b": y.bytes.len(),
-                                "first_diff": first_diff(&x.bytes, &y.bytes),
+                                "first_diff": fd, "bytes_a": hex(&x.bytes), "bytes_b": hex(&y.bytes),
+                                "diff_offsets": offsets,
                             }));
                         }
                     }
@@ -1492,7 +1511,12 @@ async fn cmd_diff(a: &Path, b: &Path, all: bool, json: bool) -> Result<()> {
                 for r in list.as_array().into_iter().flatten() {
                     let text = r["text"].as_str().map(|t| format!(" {t:?}")).unwrap_or_default();
                     let extra = if label == "changed" {
-                        format!(" ({} -> {} bytes, first difference at {})", r["len_a"], r["len_b"], r["first_diff"])
+                        format!(
+                            " ({} -> {} bytes, first difference at {}: {} -> {}, layer {} -> {})",
+                            r["len_a"], r["len_b"], r["first_diff"],
+                            r["bytes_a"].as_str().unwrap_or(""), r["bytes_b"].as_str().unwrap_or(""),
+                            r["layer"], r["layer_b"]
+                        ) + &format!(" differing offsets {}", r["diff_offsets"])
                     } else {
                         String::new()
                     };
@@ -1532,4 +1556,36 @@ async fn cmd_check(path: &Path, json: bool) -> Result<()> {
     } else {
         std::process::exit(1)
     }
+}
+
+async fn cmd_records(path: &Path, component: &str) -> Result<()> {
+    use altium::pcb::records::{kind_name, split_footprint_records};
+    let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
+    let mut cf = CompoundFile::open(bytes)?;
+    let stream = format!("{component}/Data");
+    let data = cf
+        .try_read_stream(&stream)?
+        .ok_or_else(|| anyhow!("no stream {stream}"))?;
+    let (name, records) = split_footprint_records(&data)?;
+    println!("{name}: {} records", records.len());
+    for (i, r) in records.iter().enumerate() {
+        let body = r.main_block();
+        let hex: String = body.iter().map(|b| format!("{b:02x}")).collect();
+        let text = r.text().map(|t| format!(" {t:?}")).unwrap_or_default();
+        println!("#{i} {} layer {} ({} bytes){text}: {hex}", kind_name(r.kind), r.layer().unwrap_or(0), body.len());
+    }
+    Ok(())
+}
+
+async fn cmd_stream(path: &Path, stream: &str) -> Result<()> {
+    let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
+    let mut cf = CompoundFile::open(bytes)?;
+    let data = cf.try_read_stream(stream)?.ok_or_else(|| anyhow!("no stream {stream}"))?;
+    println!("{stream}: {} bytes", data.len());
+    for (i, chunk) in data.chunks(32).enumerate() {
+        let hex: String = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        let ascii: String = chunk.iter().map(|&b| if (0x20..0x7f).contains(&b) { b as char } else { '.' }).collect();
+        println!("{:06x}  {hex:<64}  {ascii}", i * 32);
+    }
+    Ok(())
 }

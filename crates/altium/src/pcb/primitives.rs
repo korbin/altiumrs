@@ -2,6 +2,22 @@
 //! fills, regions, and 3D component bodies.
 
 /// Flag bits Altium sets on every primitive it creates (bit 3); see `binary::FLAG_ALTIUM_NATIVE`.
+/// One entry of a per-record side table, kept verbatim; `PRIMITIVEINDEX` is
+/// rewritten on write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct ExtendedEntry {
+    /// `CornerRadiusChamfer`, `CustomShapes`, `SharedUnion` or
+    /// `ExtendedPrimitiveInformation`.
+    pub stream: String,
+    /// The entry text as stored (leading `|`, no terminator).
+    pub text: String,
+    /// Position of the entry in the stream it came from; entries are written
+    /// back in this order (Altium's order is not the record order).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub seq: u32,
+}
+
 fn default_flags_extra() -> u16 {
     super::binary::FLAG_ALTIUM_NATIVE
 }
@@ -36,6 +52,16 @@ pub struct Track {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// Outline segment of a polygon pour (flag bit 1).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_polygon_outline: bool,
@@ -100,6 +126,8 @@ impl Default for Track {
             is_locked: false,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             is_polygon_outline: false,
             polygon_outline: false,
             is_free_primitive: false,
@@ -165,6 +193,16 @@ pub struct Arc {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// Outline segment of a polygon pour (flag bit 1).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_polygon_outline: bool,
@@ -229,6 +267,8 @@ impl Default for Arc {
             is_locked: false,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             is_polygon_outline: false,
             polygon_outline: false,
             is_free_primitive: false,
@@ -342,6 +382,16 @@ pub struct Pad {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// Fabrication test point, top side (flag bit 7).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_testpoint_fab_top: bool,
@@ -508,6 +558,8 @@ impl Default for Pad {
             is_locked: false,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             is_testpoint_fab_top: false,
             is_testpoint_fab_bottom: false,
             is_hidden: false,
@@ -612,6 +664,16 @@ pub struct Via {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// Fabrication test point, top side (flag bit 7).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_testpoint_fab_top: bool,
@@ -703,6 +765,8 @@ impl Default for Via {
             is_locked: false,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             is_testpoint_fab_top: false,
             is_testpoint_fab_bottom: false,
             mode: 0,
@@ -768,6 +832,16 @@ pub struct Fill {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     pub is_free_primitive: bool,
     pub is_electrical_prim: bool,
     pub is_pre_route: bool,
@@ -824,6 +898,8 @@ impl Default for Fill {
             enabled: true,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             is_free_primitive: false,
             is_electrical_prim: false,
             is_pre_route: false,
@@ -890,9 +966,24 @@ pub struct Region {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// The region is a teardrop (flag bit 4).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_teardrop: bool,
+    /// The pad (index into the component's pad list) this region belongs to,
+    /// from the record's `PADINDEX`; rewritten as the pad's record ordinal on
+    /// write.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub pad_ref: Option<usize>,
     pub cavity_height: Coord,
     pub user_routed: bool,
     pub union_index: i32,
@@ -968,6 +1059,9 @@ impl Default for Region {
             enabled: true,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
+            pad_ref: None,
             is_teardrop: false,
             cavity_height: Coord::ZERO,
             user_routed: false,
@@ -1081,6 +1175,16 @@ pub struct Text {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     /// V7 layer id written in the record tail when it cannot be derived from
     /// `layer` (mechanical layers 17..32, whose layer byte Altium clamps to
     /// Mechanical 16). Zero means "derive from `layer`".
@@ -1218,6 +1322,8 @@ impl Default for Text {
             is_locked: false,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             layer_v7: 0,
             size: Coord::ZERO,
             width: Coord::ZERO,
@@ -1345,6 +1451,16 @@ pub struct ComponentBody {
     /// Unmodelled flag bits from the record header, preserved verbatim.
     #[cfg_attr(feature = "serde", serde(default = "default_flags_extra"))]
     pub flags_extra: u16,
+    /// GUID from the footprint's `PrimitiveGuids` table (`{8-4-4-4-12}`); a
+    /// new one is generated on write when missing.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub guid: Option<String>,
+    /// Entries of the footprint's per-record side tables that refer to this
+    /// primitive by record index (`CornerRadiusChamfer`, `CustomShapes`,
+    /// `SharedUnion`, `ExtendedPrimitiveInformation`); regenerated on write
+    /// with the primitive's new index.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extended: Vec<ExtendedEntry>,
     pub cavity_height: Coord,
     pub unique_id: Option<String>,
     pub user_routed: bool,
@@ -1426,6 +1542,8 @@ impl Default for ComponentBody {
             enabled: true,
             is_keepout: false,
             flags_extra: default_flags_extra(),
+            guid: None,
+            extended: Vec::new(),
             cavity_height: Coord::ZERO,
             unique_id: None,
             user_routed: false,
