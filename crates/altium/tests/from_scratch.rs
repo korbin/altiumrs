@@ -1532,3 +1532,46 @@ fn pcblib_track_arc_fill_records_use_altiums_full_layout() {
     assert_eq!(fill.len(), 50);
     assert_eq!(&fill[37..50], &[0, 0, 0, 0, 0, 0x07, 0x00, 0x02, 0x01, 0, 0, 0, 0]);
 }
+
+#[test]
+fn pcblib_records_split_and_lint_cleanly() {
+    use altium::pcb::lint::{check_pcblib, step_checksum};
+    use altium::pcb::records::split_footprint_records;
+    use altium::pcb::{Arc, Track};
+    let mut comp = pcb::Component::new("LINT");
+    let mut pad = pcb::Pad::default();
+    pad.designator = Some("1".into());
+    comp.pads.push(pad);
+    let mut track = Track::default();
+    track.layer = 33;
+    track.end = CoordPoint::new(Coord::from_mils(10.0), Coord::from_mils(0.0));
+    comp.tracks.push(track);
+    let mut arc = Arc::default();
+    arc.radius = Coord::from_mils(5.0);
+    comp.arcs.push(arc);
+    let mut text = pcb::Text::default();
+    text.text = ".Designator".into();
+    text.layer = 63;
+    comp.texts.push(text);
+    let mut lib = pcb::Library::default();
+    lib.unique_id = "AAAAAAAA".into();
+    lib.components.push(comp);
+    let file = lib.to_bytes().unwrap();
+    let data = pcb_stream(&file, "LINT/Data");
+    let (name, records) = split_footprint_records(&data).unwrap();
+    assert_eq!(name, "LINT");
+    let kinds: Vec<u8> = records.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds.iter().copied().collect::<std::collections::BTreeSet<u8>>(), [1u8, 2, 4, 5].into_iter().collect());
+    let text = records.iter().find(|r| r.kind == 5).unwrap();
+    assert_eq!(text.text().as_deref(), Some(".Designator"));
+    assert_eq!(text.layer(), Some(63));
+    assert_eq!(text.main_block().len(), 252);
+    let pad = records.iter().find(|r| r.kind == 2).unwrap();
+    assert_eq!(pad.main_block().len(), 202);
+    let mut cf = altium::compound::CompoundFile::open(file).unwrap();
+    let problems = check_pcblib(&mut cf).unwrap();
+    assert!(problems.is_empty(), "{problems:?}");
+    // checksum: weight 1 for the first byte, then the byte index
+    assert_eq!(step_checksum(b"AB"), 65 + 66);
+    assert_eq!(step_checksum(b"ABC"), 65 + 66 + 2 * 67);
+}

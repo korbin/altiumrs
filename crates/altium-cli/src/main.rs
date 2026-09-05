@@ -29,6 +29,28 @@ enum Command {
     },
     /// Print the full OLE compound-file tree (storages + stream sizes).
     Dump { path: PathBuf },
+    /// Compare two Altium files stream by stream; footprint `Data` streams of
+    /// a `.PcbLib` are compared record by record.
+    Diff {
+        a: PathBuf,
+        b: PathBuf,
+        /// List every differing record instead of per-footprint summaries.
+        #[arg(long)]
+        all: bool,
+        /// Print the comparison as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a `.PcbLib` for inconsistencies between its records and the
+    /// tables Altium keeps next to them (header counts, primitive GUIDs, wide
+    /// strings, the component TOC, embedded model checksums, legacy record
+    /// layouts). Exits with status 1 when anything is wrong.
+    Check {
+        path: PathBuf,
+        /// Print the findings as JSON.
+        #[arg(long)]
+        json: bool,
+    },
     /// Render to PNG or SVG. Pick the format from the output extension.
     Render {
         path: PathBuf,
@@ -213,6 +235,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Info { path } => cmd_info(&path).await,
         Command::Dump { path } => cmd_dump(&path).await,
+        Command::Diff { a, b, all, json } => cmd_diff(&a, &b, all, json).await,
+        Command::Check { path, json } => cmd_check(&path, json).await,
         Command::Render {
             path,
             output,
@@ -1331,5 +1355,181 @@ fn kind_label(file: &AltiumFile) -> &'static str {
         AltiumFile::IntegratedLibrary(_) => ".IntLib",
         AltiumFile::LibraryPackage(_) => ".LibPkg",
         AltiumFile::BomDocument(_) => ".BomDoc",
+    }
+}
+
+fn list_streams(cf: &mut CompoundFile, path: &str, out: &mut Vec<String>) -> Result<()> {
+    for entry in cf.list_children(path)? {
+        let child = if path == "/" {
+            entry.name.clone()
+        } else {
+            format!("{path}/{}", entry.name)
+        };
+        if entry.is_storage {
+            list_streams(cf, &child, out)?;
+        } else {
+            out.push(child);
+        }
+    }
+    Ok(())
+}
+
+fn first_diff(a: &[u8], b: &[u8]) -> usize {
+    a.iter().zip(b).position(|(x, y)| x != y).unwrap_or(a.len().min(b.len()))
+}
+
+fn is_footprint_data(stream: &str) -> bool {
+    let parts: Vec<&str> = stream.split('/').collect();
+    parts.len() == 2 && parts[1] == "Data" && parts[0] != "Library" && parts[0] != "FileVersionInfo"
+}
+
+async fn cmd_diff(a: &Path, b: &Path, all: bool, json: bool) -> Result<()> {
+    use altium::pcb::records::{kind_name, split_footprint_records};
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut ca = CompoundFile::open(tokio::fs::read(a).await.with_context(|| format!("read {}", a.display()))?)?;
+    let mut cb = CompoundFile::open(tokio::fs::read(b).await.with_context(|| format!("read {}", b.display()))?)?;
+    let mut sa = Vec::new();
+    let mut sb = Vec::new();
+    list_streams(&mut ca, "/", &mut sa)?;
+    list_streams(&mut cb, "/", &mut sb)?;
+    let sa: BTreeSet<String> = sa.into_iter().collect();
+    let sb: BTreeSet<String> = sb.into_iter().collect();
+    let only_a: Vec<&String> = sa.difference(&sb).collect();
+    let only_b: Vec<&String> = sb.difference(&sa).collect();
+    let mut identical = 0usize;
+    let mut stream_diffs = Vec::new(); // (stream, len a, len b, first diff)
+    let mut record_diffs = Vec::new(); // json objects per footprint
+    let mut changed_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut added_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut removed_by_kind: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for s in sa.intersection(&sb) {
+        let da = ca.read_stream(s)?;
+        let db = cb.read_stream(s)?;
+        if da == db {
+            identical += 1;
+            continue;
+        }
+        if is_footprint_data(s) {
+            if let (Ok((name, ra)), Ok((_, rb))) = (split_footprint_records(&da), split_footprint_records(&db)) {
+                let same_order = ra.iter().map(|r| r.kind).eq(rb.iter().map(|r| r.kind));
+                let mut changed = Vec::new();
+                if same_order {
+                    for (i, (x, y)) in ra.iter().zip(&rb).enumerate() {
+                        if x != y {
+                            *changed_by_kind.entry(kind_name(x.kind)).or_default() += 1;
+                            changed.push(serde_json::json!({
+                                "index": i, "kind": kind_name(x.kind), "layer": x.layer(),
+                                "text": x.text(), "len_a": x.bytes.len(), "len_b": y.bytes.len(),
+                                "first_diff": first_diff(&x.bytes, &y.bytes),
+                            }));
+                        }
+                    }
+                }
+                let mut added = Vec::new();
+                let mut removed = Vec::new();
+                if !same_order {
+                    let mut pool: Vec<Option<&altium::pcb::records::RawRecord>> = ra.iter().map(Some).collect();
+                    for (i, y) in rb.iter().enumerate() {
+                        if let Some(slot) = pool.iter_mut().find(|p| p.map(|x| x == y).unwrap_or(false)) {
+                            *slot = None;
+                        } else {
+                            *added_by_kind.entry(kind_name(y.kind)).or_default() += 1;
+                            added.push(serde_json::json!({"index": i, "kind": kind_name(y.kind), "layer": y.layer(), "text": y.text()}));
+                        }
+                    }
+                    for (i, x) in pool.iter().enumerate() {
+                        if let Some(x) = x {
+                            *removed_by_kind.entry(kind_name(x.kind)).or_default() += 1;
+                            removed.push(serde_json::json!({"index": i, "kind": kind_name(x.kind), "layer": x.layer(), "text": x.text()}));
+                        }
+                    }
+                }
+                record_diffs.push(serde_json::json!({
+                    "footprint": name, "stream": s, "records_a": ra.len(), "records_b": rb.len(),
+                    "same_order": same_order, "changed": changed, "added": added, "removed": removed,
+                }));
+                continue;
+            }
+        }
+        stream_diffs.push(serde_json::json!({"stream": s, "len_a": da.len(), "len_b": db.len(), "first_diff": first_diff(&da, &db)}));
+    }
+    let summary = serde_json::json!({
+        "only_in_a": only_a, "only_in_b": only_b, "identical_streams": identical,
+        "differing_streams": stream_diffs.len() + record_diffs.len(),
+        "footprints_with_record_changes": record_diffs.len(),
+        "changed_records_by_kind": changed_by_kind, "added_records_by_kind": added_by_kind,
+        "removed_records_by_kind": removed_by_kind,
+    });
+    if json {
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({"summary": summary, "streams": stream_diffs, "footprints": record_diffs}))?);
+        return Ok(());
+    }
+    if !only_a.is_empty() {
+        println!("only in {}: {}", a.display(), only_a.len());
+        for s in only_a.iter().take(if all { usize::MAX } else { 10 }) {
+            println!("  {s}");
+        }
+    }
+    if !only_b.is_empty() {
+        println!("only in {}: {}", b.display(), only_b.len());
+        for s in only_b.iter().take(if all { usize::MAX } else { 10 }) {
+            println!("  {s}");
+        }
+    }
+    for d in &stream_diffs {
+        println!("{}: {} -> {} bytes, first difference at {}", d["stream"].as_str().unwrap_or(""), d["len_a"], d["len_b"], d["first_diff"]);
+    }
+    for f in &record_diffs {
+        let ch = f["changed"].as_array().map(|v| v.len()).unwrap_or(0);
+        let ad = f["added"].as_array().map(|v| v.len()).unwrap_or(0);
+        let rm = f["removed"].as_array().map(|v| v.len()).unwrap_or(0);
+        println!(
+            "{}: {} -> {} records; changed {ch}, added {ad}, removed {rm}",
+            f["footprint"].as_str().unwrap_or(""), f["records_a"], f["records_b"]
+        );
+        if all {
+            for (label, list) in [("changed", &f["changed"]), ("added", &f["added"]), ("removed", &f["removed"])] {
+                for r in list.as_array().into_iter().flatten() {
+                    let text = r["text"].as_str().map(|t| format!(" {t:?}")).unwrap_or_default();
+                    let extra = if label == "changed" {
+                        format!(" ({} -> {} bytes, first difference at {})", r["len_a"], r["len_b"], r["first_diff"])
+                    } else {
+                        String::new()
+                    };
+                    println!("    {label} #{} {} layer {}{text}{extra}", r["index"], r["kind"].as_str().unwrap_or(""), r["layer"]);
+                }
+            }
+        }
+    }
+    println!(
+        "identical streams: {identical}; differing: {}; footprints with record changes: {}; changed records {:?}; added {:?}; removed {:?}",
+        stream_diffs.len() + record_diffs.len(), record_diffs.len(), changed_by_kind, added_by_kind, removed_by_kind
+    );
+    Ok(())
+}
+
+async fn cmd_check(path: &Path, json: bool) -> Result<()> {
+    let bytes = tokio::fs::read(path).await.with_context(|| format!("read {}", path.display()))?;
+    let mut cf = CompoundFile::open(bytes)?;
+    let problems = altium::pcb::lint::check_pcblib(&mut cf)?;
+    if json {
+        let list: Vec<serde_json::Value> = problems
+            .iter()
+            .map(|p| serde_json::json!({"footprint": p.footprint, "message": p.message}))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&list)?);
+    } else {
+        for p in &problems {
+            match &p.footprint {
+                Some(f) => println!("{f}: {}", p.message),
+                None => println!("library: {}", p.message),
+            }
+        }
+        println!("{} problem(s)", problems.len());
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(1)
     }
 }

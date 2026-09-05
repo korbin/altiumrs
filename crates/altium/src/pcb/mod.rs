@@ -15,6 +15,8 @@ pub mod model3d;
 pub mod polygon;
 pub mod primitives;
 pub mod reader;
+pub mod records;
+pub mod lint;
 pub mod rule;
 pub mod writer;
 
