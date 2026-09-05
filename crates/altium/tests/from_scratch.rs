@@ -1490,3 +1490,45 @@ fn pcblib_component_params_toc_matches_altium() {
             .any(|k| k.starts_with("ComponentParamsTOC"))
     );
 }
+
+#[test]
+fn pcblib_track_arc_fill_records_use_altiums_full_layout() {
+    use altium::pcb::{Arc, Fill, Track};
+    let mut track = Track::default();
+    track.layer = 64; // Mechanical 8
+    track.start = CoordPoint::new(Coord::from_mils(-10.0), Coord::from_mils(0.0));
+    track.end = CoordPoint::new(Coord::from_mils(10.0), Coord::from_mils(0.0));
+    let mut arc = Arc::default();
+    arc.layer = 33;
+    arc.radius = Coord::from_mils(10.0);
+    let mut fill = Fill::default();
+    fill.layer = 63;
+    fill.corner2 = CoordPoint::new(Coord::from_mils(10.0), Coord::from_mils(10.0));
+    let mut comp = pcb::Component::new("LAYOUT");
+    comp.tracks.push(track);
+    comp.arcs.push(arc);
+    comp.fills.push(fill);
+    let mut lib = pcb::Library::default();
+    lib.unique_id = "AAAAAAAA".into();
+    lib.components.push(comp);
+    let data = pcb_stream(&lib.to_bytes().unwrap(), "LAYOUT/Data");
+    // walk the records: [u32 name block][type u8][u32 len][block]...
+    let mut p = 4 + u32::from_le_bytes(data[0..4].try_into().unwrap()) as usize;
+    let mut seen = std::collections::BTreeMap::new();
+    while p + 5 <= data.len() {
+        let t = data[p];
+        let len = u32::from_le_bytes(data[p + 1..p + 5].try_into().unwrap()) as usize;
+        let block = &data[p + 5..p + 5 + len];
+        seen.insert(t, block.to_vec());
+        p += 5 + len;
+    }
+    let track = &seen[&4];
+    assert_eq!(track.len(), 49);
+    assert_eq!(&track[33..49], &[0, 0, 0, 0, 0, 0, 0, 0, 0x08, 0x00, 0x02, 0x01, 0, 0, 0, 0]);
+    let arc = &seen[&1];
+    assert_eq!(arc.len(), 60);
+    assert_eq!(&arc[45..60], &[0, 0, 0, 0, 0, 0, 0, 0x06, 0x00, 0x03, 0x01, 0, 0, 0, 0]);
+    let fill = &seen[&6];
+    assert_eq!(fill.len(), 50);
+    assert_eq!(&fill[37..50], &[0, 0, 0, 0, 0, 0x07, 0x00, 0x02, 0x01, 0, 0, 0, 0]);
+}

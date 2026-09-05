@@ -874,9 +874,13 @@ fn write_arc<W: Write + Seek>(bw: &mut BinaryWriter<W>, arc: &Arc) -> Result<()>
         w.write_f64(arc.start_angle)?;
         w.write_f64(arc.end_angle)?;
         w.write_i32(arc.width.to_raw())?;
-        // Sub-polygon index (0xFFFF = standalone); KiCad reads it
-        // unconditionally, same as for tracks.
-        w.write_u16(0xFFFF)?;
+        // Altium's 60-byte arc record: sub-polygon index, pad byte, union
+        // index, V7 layer id, reserved word.
+        w.write_u16(0)?;
+        w.write_u8(0)?;
+        w.write_u32(0)?;
+        w.write_u32(v7_layer_id(arc.layer))?;
+        w.write_u32(0)?;
         Ok(())
     })
 }
@@ -1171,11 +1175,16 @@ fn write_track<W: Write + Seek>(bw: &mut BinaryWriter<W>, track: &Track) -> Resu
         write_coord_point(w, track.start)?;
         write_coord_point(w, track.end)?;
         w.write_i32(track.width.to_raw())?;
-        // Sub-polygon index (0xFFFF = standalone) plus one pad byte. Real
-        // Altium always emits these and KiCad's importer reads them
-        // unconditionally — without them its Tracks6 parse fails.
-        w.write_u16(0xFFFF)?;
+        // Altium's 49-byte track record: sub-polygon index (0 in libraries),
+        // a pad byte, the union index, another pad byte, the V7 layer id and
+        // a reserved word. KiCad's importer reads the first three
+        // unconditionally.
+        w.write_u16(0)?;
         w.write_u8(0)?;
+        w.write_u32(0)?;
+        w.write_u8(0)?;
+        w.write_u32(v7_layer_id(track.layer))?;
+        w.write_u32(0)?;
         Ok(())
     })
 }
@@ -1325,6 +1334,13 @@ fn write_fill<W: Write + Seek>(bw: &mut BinaryWriter<W>, fill: &Fill) -> Result<
         write_coord_point(w, fill.corner1)?;
         write_coord_point(w, fill.corner2)?;
         w.write_f64(fill.rotation)?;
+        // Altium's 50-byte fill record: sub-polygon index, pad byte, a
+        // reserved word, the V7 layer id and a reserved word.
+        w.write_u16(0)?;
+        w.write_u8(0)?;
+        w.write_u16(0)?;
+        w.write_u32(v7_layer_id(fill.layer))?;
+        w.write_u32(0)?;
         Ok(())
     })
 }
