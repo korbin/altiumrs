@@ -107,7 +107,13 @@ pub fn component_to_record_params(component: &Component, params: &mut ParameterM
     d.location_x_frac = lxf;
     d.location_y = ly;
     d.location_y_frac = lyf;
-    d.lib_reference = component.lib_reference.clone();
+    // Altium's LibReference is the symbol name; a component built in code
+    // usually sets only `name`, and an empty LibReference reads back nameless.
+    d.lib_reference = component
+        .lib_reference
+        .clone()
+        .filter(|r| !r.is_empty())
+        .or_else(|| Some(component.name.clone()));
     d.component_description = component.description.clone();
     // Inverse of "user-facing PARTCOUNT - 1": always emit at least 1.
     d.part_count = component.part_count.max(0) + 1;

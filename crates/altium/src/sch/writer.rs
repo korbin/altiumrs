@@ -106,6 +106,13 @@ fn write_file_header(cf: &mut CompoundFile, library: &Library) -> Result<()> {
     let mut params = ParameterMap::new();
     populate_default_file_header(&mut params, library);
     for (k, v) in &library.file_header_parameters {
+        // The component list (CompCount, LibRefN, CompDescrN, PartCountN)
+        // always describes the components actually written; a header carried
+        // over from the source file would otherwise hide added components and
+        // keep entries for removed ones.
+        if is_component_list_key(k) {
+            continue;
+        }
         params.insert(k, v.clone());
     }
     write_c_string_param_block(&mut bw, &params)?;
@@ -119,6 +126,19 @@ fn write_file_header(cf: &mut CompoundFile, library: &Library) -> Result<()> {
 
     cf.write_stream("FileHeader", &buf.into_inner())?;
     Ok(())
+}
+
+/// Header keys that enumerate the components and must follow `library.components`.
+fn is_component_list_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    if upper == "COMPCOUNT" {
+        return true;
+    }
+    ["LIBREF", "COMPDESCR", "PARTCOUNT"].iter().any(|prefix| {
+        upper
+            .strip_prefix(prefix)
+            .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit()))
+    })
 }
 
 fn populate_default_file_header(params: &mut ParameterMap, library: &Library) {

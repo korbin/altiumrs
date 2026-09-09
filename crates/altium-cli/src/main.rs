@@ -101,7 +101,10 @@ enum Command {
     /// Extract the netlist from a `.PcbDoc` or `.SchDoc`. PCB extraction is
     /// explicit (each pad carries its net name); SchDoc extraction traces
     /// the wire graph and names nets from net labels, power ports, ports and
-    /// harness-connector entries (`<port>.<entry>`).
+    /// harness-connector entries (`<port>.<entry>`). Sheet-symbol entries
+    /// and ports join the wire graph like pins; the `json` format lists the
+    /// ones each net reaches as `sheet_entries` / `ports` so a hierarchical
+    /// design can be flattened.
     Netlist {
         /// Source `.PcbDoc` or `.SchDoc`.
         path: PathBuf,
@@ -112,15 +115,18 @@ enum Command {
         /// or `csv`.
         #[arg(long, default_value = "protel")]
         format: String,
-        /// SchDoc only: also emit every sheet-symbol entry as a connection
-        /// (designator = sheet symbol name, pad = entry name) so a parent
-        /// sheet's netlist shows which child entries are wired together.
+        /// SchDoc only: also fold every sheet-symbol entry a net reaches into
+        /// its connections (designator = sheet symbol name, pad = entry
+        /// name) so the flat formats (protel, kicad, csv) show which child
+        /// entries are wired together. JSON always carries them as
+        /// `sheet_entries`.
         #[arg(long)]
         sheet_entries: bool,
-        /// SchDoc only: also emit every port a net touches as a
-        /// pseudo-connection (designator `PORT`, pad = port name; harness
-        /// entries as `<bundle>.<entry>`), for binding child-sheet nets to
-        /// the parent's sheet entries.
+        /// SchDoc only: also fold every port a net reaches into its
+        /// connections as a pseudo-connection (designator `PORT`, pad = port
+        /// name; harness entries as `<bundle>.<entry>`), for binding
+        /// child-sheet nets to the parent's sheet entries in the flat
+        /// formats. JSON always carries them as `ports`.
         #[arg(long)]
         ports: bool,
     },

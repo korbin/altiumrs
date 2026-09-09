@@ -49,12 +49,46 @@ pub struct NetConnection {
     pub pad: String,
 }
 
+/// A sheet-symbol entry a net reaches on a parent sheet (SchDoc only). A
+/// flattener binds it to the child sheet's port of the same `entry` name.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct NetSheetEntry {
+    /// The sheet symbol's name — its RECORD=32 sheet-name annotation
+    /// (`PSU`), else the typed sheet/file name, else `SHEET<n>`.
+    pub sheet_symbol: String,
+    /// The child sheet file from the RECORD=33 annotation (`PSU.SchDoc`).
+    pub file_name: Option<String>,
+    /// Entry name. Harness-connector signals fanned out from a harness
+    /// entry read `<entry>.<signal>`.
+    pub entry: String,
+    /// Altium `IOTYPE`: 0 unspecified, 1 output, 2 input, 3 bidirectional.
+    pub io_type: i32,
+}
+
+/// A port a net reaches (SchDoc only) — the child-sheet half of a
+/// hierarchical connection. Harness-connector signals read
+/// `<bundle>.<signal>`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, PartialOrd, Ord)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct NetPort {
+    pub name: String,
+    /// Altium `IOTYPE`: 0 unspecified, 1 output, 2 input, 3 bidirectional.
+    pub io_type: i32,
+}
+
 /// A named electrical net.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct NetlistNet {
     pub name: String,
     pub connections: Vec<NetConnection>,
+    /// Sheet-symbol entries this net reaches (always empty for PcbDoc).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub sheet_entries: Vec<NetSheetEntry>,
+    /// Ports this net reaches (always empty for PcbDoc).
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub ports: Vec<NetPort>,
 }
 
 /// Where the netlist was extracted from. Drives the small differences in
@@ -78,17 +112,21 @@ pub struct Netlist {
 }
 
 /// Options for schematic netlist extraction.
+///
+/// Sheet entries and ports always take part in the wire graph and are
+/// reported structurally on every net ([`NetlistNet::sheet_entries`],
+/// [`NetlistNet::ports`]). These flags additionally fold them into
+/// [`NetlistNet::connections`] so the flat text formats (Protel, KiCad,
+/// CSV) can carry them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SchNetlistOptions {
-    /// Emit every sheet-symbol entry as a connection whose designator is
-    /// the sheet symbol's name (RECORD=32 annotation, else the typed
-    /// sheet/file name) and whose pad is the entry name. Lets a parent
-    /// sheet's netlist show which child-sheet entries share a wire.
+    /// Also emit every sheet-symbol entry a net reaches as a connection
+    /// whose designator is the sheet symbol's name (RECORD=32 annotation,
+    /// else the typed sheet/file name) and whose pad is the entry name.
     pub include_sheet_entries: bool,
-    /// Emit every port a net touches as a pseudo-connection with designator
-    /// [`PORT_DESIGNATOR`] and pad = port name (harness entries report
-    /// `<bundle>.<entry>`), so a flattener can bind child-sheet nets to the
-    /// parent's sheet entries.
+    /// Also emit every port a net reaches as a pseudo-connection with
+    /// designator [`PORT_DESIGNATOR`] and pad = port name (harness entries
+    /// report `<bundle>.<entry>`).
     pub include_ports: bool,
 }
 
@@ -147,7 +185,11 @@ impl Netlist {
             .map(|(name, mut connections)| {
                 connections.sort();
                 connections.dedup();
-                NetlistNet { name, connections }
+                NetlistNet {
+                    name,
+                    connections,
+                    ..Default::default()
+                }
             })
             .collect();
 
@@ -166,8 +208,9 @@ impl Netlist {
     /// Build a netlist from a `.SchDoc` by tracing the wire graph.
     ///
     /// Endpoints (pin connectors, wire vertices, junctions, net-label
-    /// anchors, power-port anchors, port ends, harness-connector entry
-    /// points) are collected onto a position-keyed graph. Wire segments,
+    /// anchors, power-port anchors, port ends, sheet-symbol entry points,
+    /// harness-connector entry points) are collected onto a position-keyed
+    /// graph. Wire segments,
     /// bus entries and signal-harness lines produce edges. Net labels,
     /// power ports and ports name the nets they touch; a harness
     /// connector's entries are named `<bundle>.<entry>`, where the bundle
@@ -177,10 +220,15 @@ impl Netlist {
     /// named single-pin nets are dropped, but a pin that only reaches a port
     /// is kept under the port's name because the port carries it off-sheet.
     ///
-    /// With [`SchNetlistOptions::include_sheet_entries`], every sheet-symbol
-    /// entry is added as a pseudo-connection (designator = the sheet
-    /// symbol's name, pad = entry name) so a parent sheet's netlist shows
-    /// which child entries are wired together. Bus-tap inheritance is not
+    /// Sheet-symbol entries and ports are hotspots like pins: each joins
+    /// whatever net touches its edge point, and every net lists the ones it
+    /// reaches in [`NetlistNet::sheet_entries`] / [`NetlistNet::ports`] so
+    /// a hierarchical design can be flattened (parent entry `PSU.EN` binds
+    /// to port `EN` of `PSU.SchDoc`). A net whose only members
+    /// are one pin and one sheet entry is kept — the entry carries it
+    /// off-sheet. With [`SchNetlistOptions::include_sheet_entries`] /
+    /// [`SchNetlistOptions::include_ports`] the same members are also folded
+    /// into `connections` as pseudo-pins. Bus-tap inheritance is not
     /// modelled.
     pub fn from_sch_document_with(doc: &sch::Document, options: &SchNetlistOptions) -> Self {
         let mut components = Vec::new();
@@ -257,21 +305,20 @@ impl Netlist {
             }
         }
 
-        // Sheet-symbol entries as pseudo-pins (opt-in): lets a parent sheet's
-        // netlist say which child-sheet entries share a wire.
-        if options.include_sheet_entries {
-            for (idx, sym) in doc.sheet_symbols.iter().enumerate() {
-                let name = sheet_symbol_name(doc, sym, idx);
-                for entry in &sym.entries {
-                    let entry_name = entry.name.trim();
-                    if entry_name.is_empty() {
-                        continue;
-                    }
-                    pin_endpoints.push((
-                        name.clone(),
-                        entry_name.to_string(),
-                        sheet_entry_endpoint(sym, entry),
-                    ));
+        // Sheet-symbol entries are hotspots like pins: an entry joins
+        // whatever net touches its edge point. Named entries only — an
+        // unnamed one has nothing to bind to.
+        let sheet_idents: Vec<SheetSymbolIdentity> = doc
+            .sheet_symbols
+            .iter()
+            .enumerate()
+            .map(|(idx, sym)| sheet_symbol_identity(doc, sym, idx))
+            .collect();
+        let mut sheet_entry_nodes: Vec<(usize, usize, CoordPoint)> = Vec::new();
+        for (si, sym) in doc.sheet_symbols.iter().enumerate() {
+            for (ei, entry) in sym.entries.iter().enumerate() {
+                if !entry.name.trim().is_empty() {
+                    sheet_entry_nodes.push((si, ei, sheet_entry_endpoint(sym, entry)));
                 }
             }
         }
@@ -317,6 +364,7 @@ impl Netlist {
         nodes.extend(doc.net_labels.iter().map(|l| l.location));
         nodes.extend(doc.power_objects.iter().map(|p| p.location));
         nodes.extend(harness_entry_nodes.iter().map(|(_, _, p)| *p));
+        nodes.extend(sheet_entry_nodes.iter().map(|(_, _, p)| *p));
         for be in &doc.bus_entries {
             nodes.push(be.location);
             nodes.push(be.corner);
@@ -332,19 +380,6 @@ impl Netlist {
         nodes.extend(port_nodes.iter().map(|(_, p)| *p));
         nodes.sort_by_key(|p| (p.x.to_raw(), p.y.to_raw()));
         nodes.dedup();
-
-        // Ports as pseudo-pins (opt-in): each net then lists the ports it
-        // touches, so a flattener can bind a child sheet's nets to the
-        // parent's sheet entries. Harness entries are added as
-        // `<bundle>.<entry>` once bundle names are known (below).
-        if options.include_ports {
-            for (i, p) in &port_nodes {
-                let name = doc.ports[*i].name.trim();
-                if !name.is_empty() {
-                    pin_endpoints.push((PORT_DESIGNATOR.to_string(), name.to_string(), *p));
-                }
-            }
-        }
 
         let mut uf = UnionFind::default();
         for p in &nodes {
@@ -373,6 +408,36 @@ impl Netlist {
                         uf.union(*p, a);
                     }
                 }
+            }
+        }
+
+        // Structured membership: the sheet entries and ports each net
+        // reaches, keyed by union-find root like the pins. Harness signals
+        // are added below once bundle names are known.
+        let mut sheet_entries_by_root: HashMap<CoordPoint, Vec<NetSheetEntry>> = HashMap::new();
+        for &(si, ei, p) in &sheet_entry_nodes {
+            let entry = &doc.sheet_symbols[si].entries[ei];
+            let root = uf.find(p);
+            sheet_entries_by_root
+                .entry(root)
+                .or_default()
+                .push(NetSheetEntry {
+                    sheet_symbol: sheet_idents[si].name.clone(),
+                    file_name: sheet_idents[si].file_name.clone(),
+                    entry: entry.name.trim().to_string(),
+                    io_type: entry.io_type,
+                });
+        }
+        let mut ports_by_root: HashMap<CoordPoint, Vec<NetPort>> = HashMap::new();
+        for (i, p) in &port_nodes {
+            let port = &doc.ports[*i];
+            let name = port.name.trim();
+            if !name.is_empty() {
+                let root = uf.find(*p);
+                ports_by_root.entry(root).or_default().push(NetPort {
+                    name: name.to_string(),
+                    io_type: port.io_type,
+                });
             }
         }
 
@@ -418,29 +483,35 @@ impl Netlist {
                 .map(harness_primary_point)
                 .collect();
             hnodes.extend(primaries.iter().copied());
-            // (priority, bundle name, anchor point, (sheet symbol, entry) if
-            // the anchor is a sheet entry). Lower priority wins the name.
-            let mut anchors: Vec<(u8, String, CoordPoint, Option<(String, String)>)> = Vec::new();
+            // Bundle-name anchors; the lowest priority wins the name.
+            let mut anchors: Vec<HarnessAnchor> = Vec::new();
             for label in &doc.net_labels {
                 let text = label.text.trim();
                 if !text.is_empty() {
-                    anchors.push((0, text.to_string(), label.location, None));
+                    anchors.push(HarnessAnchor {
+                        priority: 0,
+                        name: text.to_string(),
+                        point: label.location,
+                        io_type: None,
+                        sheet_entry: None,
+                    });
                 }
                 hnodes.push(label.location);
             }
-            for (idx, sym) in doc.sheet_symbols.iter().enumerate() {
-                let mut sym_name: Option<String> = None;
-                for entry in &sym.entries {
+            for (si, sym) in doc.sheet_symbols.iter().enumerate() {
+                for (ei, entry) in sym.entries.iter().enumerate() {
                     if !entry.harness_type.as_deref().is_some_and(|t| !t.trim().is_empty()) {
                         continue;
                     }
                     let p = sheet_entry_endpoint(sym, entry);
                     hnodes.push(p);
-                    let name = sym_name
-                        .get_or_insert_with(|| sheet_symbol_name(doc, sym, idx))
-                        .clone();
-                    let entry_name = entry.name.trim().to_string();
-                    anchors.push((2, entry_name.clone(), p, Some((name, entry_name))));
+                    anchors.push(HarnessAnchor {
+                        priority: 2,
+                        name: entry.name.trim().to_string(),
+                        point: p,
+                        io_type: Some(entry.io_type),
+                        sheet_entry: Some((si, ei)),
+                    });
                 }
             }
             hnodes.extend(doc.junctions.iter().map(|j| j.location));
@@ -455,10 +526,16 @@ impl Netlist {
                 }
                 for p in port_endpoints(port) {
                     let p = snap_to_nodes(p, &hnodes, PORT_SNAP_RAW);
-                    anchors.push((1, port.name.trim().to_string(), p, None));
+                    anchors.push(HarnessAnchor {
+                        priority: 1,
+                        name: port.name.trim().to_string(),
+                        point: p,
+                        io_type: Some(port.io_type),
+                        sheet_entry: None,
+                    });
                 }
             }
-            hnodes.extend(anchors.iter().map(|(_, _, p, _)| *p));
+            hnodes.extend(anchors.iter().map(|a| a.point));
             hnodes.sort_by_key(|p| (p.x.to_raw(), p.y.to_raw()));
             hnodes.dedup();
             for p in &hnodes {
@@ -496,14 +573,14 @@ impl Netlist {
             }
             for (ci, hc) in doc.harness_connectors.iter().enumerate() {
                 let root = huf.find(primaries[ci]);
-                let mut group: Vec<&(u8, String, CoordPoint, Option<(String, String)>)> = anchors
+                let mut group: Vec<&HarnessAnchor> = anchors
                     .iter()
-                    .filter(|(_, name, p, _)| !name.is_empty() && huf.find(*p) == root)
+                    .filter(|a| !a.name.is_empty() && huf.find(a.point) == root)
                     .collect();
-                group.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+                group.sort_by(|a, b| (a.priority, &a.name).cmp(&(b.priority, &b.name)));
                 let bundle = group
                     .first()
-                    .map(|(_, name, _, _)| name.clone())
+                    .map(|a| a.name.clone())
                     .or_else(|| {
                         hc.harness_type
                             .as_ref()
@@ -511,10 +588,11 @@ impl Netlist {
                             .filter(|t| !t.is_empty())
                     })
                     .unwrap_or_else(|| format!("HARNESS{}", ci + 1));
-                let sheet_anchors: Vec<(String, String)> = group
-                    .iter()
-                    .filter_map(|(_, _, _, se)| se.clone())
-                    .collect();
+                // The bundle's direction: the harness port's, else the
+                // harness sheet entry's, else unspecified.
+                let bundle_io_type = group.iter().find_map(|a| a.io_type).unwrap_or(0);
+                let sheet_anchors: Vec<(usize, usize)> =
+                    group.iter().filter_map(|a| a.sheet_entry).collect();
                 for (c, ei, p) in &harness_entry_nodes {
                     if *c != ci {
                         continue;
@@ -525,21 +603,25 @@ impl Netlist {
                     }
                     let root = uf.find(*p);
                     named_nets.entry(root).or_insert(format!("{bundle}.{entry}"));
-                    if options.include_ports {
-                        pin_endpoints.push((
-                            PORT_DESIGNATOR.to_string(),
-                            format!("{bundle}.{entry}"),
-                            *p,
-                        ));
-                    }
+                    ports_by_root.entry(root).or_default().push(NetPort {
+                        name: format!("{bundle}.{entry}"),
+                        io_type: bundle_io_type,
+                    });
                     // A connector fanned out from child sheets' harness
                     // entries: report each signal against every such sheet
                     // symbol as `<entry>.<signal>` so a flattener can bind
                     // it to the child's `<port>.<signal>`.
-                    if options.include_sheet_entries {
-                        for (sym, sym_entry) in &sheet_anchors {
-                            pin_endpoints.push((sym.clone(), format!("{sym_entry}.{entry}"), *p));
-                        }
+                    for &(si, sei) in &sheet_anchors {
+                        let sym_entry = &doc.sheet_symbols[si].entries[sei];
+                        sheet_entries_by_root
+                            .entry(root)
+                            .or_default()
+                            .push(NetSheetEntry {
+                                sheet_symbol: sheet_idents[si].name.clone(),
+                                file_name: sheet_idents[si].file_name.clone(),
+                                entry: format!("{}.{entry}", sym_entry.name.trim()),
+                                io_type: sym_entry.io_type,
+                            });
                     }
                 }
             }
@@ -557,19 +639,31 @@ impl Netlist {
                 .push(NetConnection { designator, pad });
         }
 
-        // Group connections by name so power ports / net labels with the
-        // same name across the sheet merge into a single net (matches how
+        // Every root carrying a pin, a sheet entry or a port is a candidate
+        // net. Roots are visited in coordinate order so the auto names are
+        // deterministic (HashMap iteration is not).
+        let mut roots: Vec<CoordPoint> = nets_by_root
+            .keys()
+            .chain(sheet_entries_by_root.keys())
+            .chain(ports_by_root.keys())
+            .copied()
+            .collect();
+        roots.sort_by_key(|p| (p.x.to_raw(), p.y.to_raw()));
+        roots.dedup();
+
+        // Group members by name so power ports / net labels with the same
+        // name across the sheet merge into a single net (matches how
         // Altium's compiler unifies same-named subnets). Auto-named
-        // single-pin "nets" (a pin sitting on nothing) are filtered at the
-        // end — they're not electrically meaningful and they bloat the
-        // exported netlist with `(\nN00001\nR1-1\n)`-style blocks. Altium
-        // does the same unless `NetlistSinglePinNets=1`. Named single-pin
-        // nets stay: a pin whose only neighbour is a port or harness entry
-        // is connected off-sheet.
-        let mut by_name: BTreeMap<String, Vec<NetConnection>> = BTreeMap::new();
+        // single-member "nets" (a pin sitting on nothing, an unwired sheet
+        // entry) are filtered at the end — they're not electrically
+        // meaningful and they bloat the exported netlist with
+        // `(\nN00001\nR1-1\n)`-style blocks. Altium does the same unless
+        // `NetlistSinglePinNets=1`. Named single-pin nets stay, and so does
+        // a pin whose only neighbour is a sheet entry: both leave the sheet.
+        let mut by_name: BTreeMap<String, NetlistNet> = BTreeMap::new();
         let mut auto_named: BTreeSet<String> = BTreeSet::new();
         let mut auto_index: usize = 0;
-        for (root, connections) in nets_by_root {
+        for root in roots {
             let (name, is_auto) = match named_nets.remove(&root) {
                 Some(n) => (n, false),
                 None => {
@@ -580,21 +674,57 @@ impl Netlist {
             if is_auto {
                 auto_named.insert(name.clone());
             }
-            by_name.entry(name).or_default().extend(connections);
+            let net = by_name.entry(name.clone()).or_insert_with(|| NetlistNet {
+                name,
+                ..Default::default()
+            });
+            if let Some(conns) = nets_by_root.remove(&root) {
+                net.connections.extend(conns);
+            }
+            if let Some(entries) = sheet_entries_by_root.remove(&root) {
+                net.sheet_entries.extend(entries);
+            }
+            if let Some(ports) = ports_by_root.remove(&root) {
+                net.ports.extend(ports);
+            }
         }
         let mut nets: Vec<NetlistNet> = by_name
-            .into_iter()
-            .filter_map(|(name, mut connections)| {
-                connections.sort();
-                connections.dedup();
-                if auto_named.contains(&name) && connections.len() < 2 {
+            .into_values()
+            .filter_map(|mut net| {
+                net.connections.sort();
+                net.connections.dedup();
+                net.sheet_entries.sort();
+                net.sheet_entries.dedup();
+                net.ports.sort();
+                net.ports.dedup();
+                let members = net.connections.len() + net.sheet_entries.len() + net.ports.len();
+                if auto_named.contains(&net.name) && members < 2 {
                     return None;
                 }
                 // A port touching nothing is not a net.
-                if connections.len() == 1 && connections[0].designator == PORT_DESIGNATOR {
+                if net.connections.is_empty() && net.sheet_entries.is_empty() && net.ports.len() < 2 {
                     return None;
                 }
-                Some(NetlistNet { name, connections })
+                // Opt-in: fold the structured members into `connections` as
+                // pseudo-pins for the flat text formats.
+                if options.include_sheet_entries {
+                    net.connections
+                        .extend(net.sheet_entries.iter().map(|e| NetConnection {
+                            designator: e.sheet_symbol.clone(),
+                            pad: e.entry.clone(),
+                        }));
+                }
+                if options.include_ports {
+                    net.connections.extend(net.ports.iter().map(|p| NetConnection {
+                        designator: PORT_DESIGNATOR.to_string(),
+                        pad: p.name.clone(),
+                    }));
+                }
+                if options.include_sheet_entries || options.include_ports {
+                    net.connections.sort();
+                    net.connections.dedup();
+                }
+                Some(net)
             })
             .collect();
         nets.sort_by(|a, b| a.name.cmp(&b.name));
@@ -742,6 +872,34 @@ impl Netlist {
                 json_field(&mut out, "pad", &conn.pad, false);
                 out.push('}');
             }
+            out.push_str("\n      ],");
+            // Hierarchical hooks (SchDoc only; empty arrays for PcbDoc).
+            out.push_str("\n      \"sheet_entries\": [");
+            for (j, e) in net.sheet_entries.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str("\n        {\"sheet_symbol\": ");
+                json_string(&mut out, &e.sheet_symbol);
+                out.push_str(", \"file_name\": ");
+                match &e.file_name {
+                    Some(f) => json_string(&mut out, f),
+                    None => out.push_str("null"),
+                }
+                out.push_str(", \"entry\": ");
+                json_string(&mut out, &e.entry);
+                let _ = write!(out, ", \"io_type\": {}}}", e.io_type);
+            }
+            out.push_str("\n      ],");
+            out.push_str("\n      \"ports\": [");
+            for (j, p) in net.ports.iter().enumerate() {
+                if j > 0 {
+                    out.push(',');
+                }
+                out.push_str("\n        {\"name\": ");
+                json_string(&mut out, &p.name);
+                let _ = write!(out, ", \"io_type\": {}}}", p.io_type);
+            }
             out.push_str("\n      ]");
             out.push_str("\n    }");
         }
@@ -865,6 +1023,62 @@ fn sch_footprint(comp: &sch::Component) -> Option<String> {
         .and_then(|i| i.model_name.clone())
 }
 
+/// A candidate bundle name reachable from a harness connector's primary
+/// connection point.
+struct HarnessAnchor {
+    /// 0 net label, 1 harness port, 2 harness-typed sheet entry; lowest wins.
+    priority: u8,
+    name: String,
+    point: CoordPoint,
+    /// `IOTYPE` of the port / sheet entry, when the anchor has one.
+    io_type: Option<i32>,
+    /// `(sheet symbol index, entry index)` when the anchor is a sheet entry.
+    sheet_entry: Option<(usize, usize)>,
+}
+
+/// What a sheet symbol is called and which child sheet it opens.
+struct SheetSymbolIdentity {
+    name: String,
+    file_name: Option<String>,
+}
+
+/// Resolve a sheet symbol's name and file name from its RECORD=32 / 33
+/// annotations. Those records are children of the RECORD=15 symbol and
+/// carry its record index as `OWNERINDEX` — the same index the symbol's
+/// own RECORD=16 entries carry, which is the only place the reader keeps
+/// it. Symbols without entries (or hand-built documents, whose entries
+/// have `owner_index == 0`) fall back to geometry: Altium parks the name
+/// one grid above the symbol's top-left corner and the file name on the
+/// corner itself.
+fn sheet_symbol_identity(
+    doc: &sch::Document,
+    sym: &sch::primitives::SheetSymbol,
+    idx: usize,
+) -> SheetSymbolIdentity {
+    const RAW_PER_DXP: i64 = crate::sch::binary::RAW_PER_DXP as i64;
+    let owner = sym
+        .entries
+        .iter()
+        .map(|e| e.common.owner_index)
+        .find(|&o| o > 0);
+    let name = owner
+        .and_then(|o| owned_annotation_text(&doc.sheet_name_annotations, o))
+        .unwrap_or_else(|| sheet_symbol_name(doc, sym, idx));
+    let file_name = owner
+        .and_then(|o| owned_annotation_text(&doc.sheet_filename_annotations, o))
+        .or_else(|| {
+            nearest_annotation_text(&doc.sheet_filename_annotations, sym.location, 20 * RAW_PER_DXP)
+        })
+        .or_else(|| {
+            sym.file_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        });
+    SheetSymbolIdentity { name, file_name }
+}
+
 /// Name a sheet symbol the way Altium's compiler does: the RECORD=32
 /// sheet-name annotation, which Altium parks one grid (10 DXP) above the
 /// symbol's top-left corner. Falls back to the nearest annotation within
@@ -875,12 +1089,56 @@ fn sheet_symbol_name(
     idx: usize,
 ) -> String {
     const RAW_PER_DXP: i64 = crate::sch::binary::RAW_PER_DXP as i64;
-    let sx = sym.location.x.to_raw() as i64;
-    let sy = sym.location.y.to_raw() as i64 + 10 * RAW_PER_DXP;
+    let anchor = CoordPoint::new(
+        sym.location.x,
+        Coord::from_raw(sym.location.y.to_raw().wrapping_add(10 * crate::sch::binary::RAW_PER_DXP)),
+    );
+    if let Some(name) = nearest_annotation_text(&doc.sheet_name_annotations, anchor, 20 * RAW_PER_DXP) {
+        return name;
+    }
+    sym.sheet_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| sym.file_name.as_deref().map(str::trim).filter(|s| !s.is_empty()))
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("SHEET{}", idx + 1))
+}
+
+/// Case-insensitive key lookup in a raw annotation record.
+fn ann_get<'a>(ann: &'a BTreeMap<String, String>, key: &str) -> Option<&'a str> {
+    ann.iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, v)| v.as_str())
+}
+
+/// `TEXT` of the first annotation whose `OWNERINDEX` is `owner`.
+fn owned_annotation_text(anns: &[BTreeMap<String, String>], owner: i32) -> Option<String> {
+    anns.iter()
+        .filter(|a| {
+            ann_get(a, "OWNERINDEX").and_then(|v| v.trim().parse::<i32>().ok()) == Some(owner)
+        })
+        .filter_map(|a| ann_get(a, "TEXT"))
+        .map(str::trim)
+        .find(|t| !t.is_empty())
+        .map(str::to_string)
+}
+
+/// `TEXT` of the annotation nearest to `anchor`, if within `max_dist`
+/// (Manhattan distance in raw units). Annotation locations are in DXP.
+fn nearest_annotation_text(
+    anns: &[BTreeMap<String, String>],
+    anchor: CoordPoint,
+    max_dist: i64,
+) -> Option<String> {
+    const RAW_PER_DXP: i64 = crate::sch::binary::RAW_PER_DXP as i64;
+    let (sx, sy) = (anchor.x.to_raw() as i64, anchor.y.to_raw() as i64);
     let mut best: Option<(i64, String)> = None;
-    for ann in &doc.sheet_name_annotations {
-        let parse = |key: &str| ann.get(key).and_then(|v| v.trim().parse::<i64>().ok());
-        let (Some(ax), Some(ay), Some(text)) = (parse("Location.X"), parse("Location.Y"), ann.get("Text")) else {
+    for ann in anns {
+        let parse = |key: &str| ann_get(ann, key).and_then(|v| v.trim().parse::<i64>().ok());
+        let (Some(ax), Some(ay), Some(text)) =
+            (parse("LOCATION.X"), parse("LOCATION.Y"), ann_get(ann, "TEXT"))
+        else {
             continue;
         };
         let text = text.trim();
@@ -892,18 +1150,7 @@ fn sheet_symbol_name(
             best = Some((d, text.to_string()));
         }
     }
-    if let Some((d, name)) = best {
-        if d <= 20 * RAW_PER_DXP {
-            return name;
-        }
-    }
-    sym.sheet_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .or_else(|| sym.file_name.as_deref().map(str::trim).filter(|s| !s.is_empty()))
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("SHEET{}", idx + 1))
+    best.filter(|(d, _)| *d <= max_dist).map(|(_, name)| name)
 }
 
 /// World position of a sheet entry: `location` is the symbol's top-left,
@@ -1007,6 +1254,12 @@ fn json_opt_field(out: &mut String, name: &str, value: Option<&str>) {
             let _ = write!(out, "\"{name}\": null");
         }
     }
+}
+
+fn json_string(out: &mut String, value: &str) {
+    out.push('"');
+    out.push_str(&json_escape(value));
+    out.push('"');
 }
 
 fn json_escape(s: &str) -> String {
@@ -1394,6 +1647,7 @@ mod tests {
                         pad: "1".into(),
                     },
                 ],
+                ..Default::default()
             }],
         };
         let out = nl.to_protel();
@@ -1428,6 +1682,7 @@ mod tests {
                     designator: "R1".into(),
                     pad: "1".into(),
                 }],
+                ..Default::default()
             }],
         };
         let out = nl.to_kicad();
@@ -1454,6 +1709,7 @@ mod tests {
                         pad: "2".into(),
                     },
                 ],
+                ..Default::default()
             }],
         };
         let csv = nl.to_csv();
@@ -2040,7 +2296,19 @@ mod tests {
         w.vertices = vec![dxp_pt(300.0, 470.0), dxp_pt(600.0, 470.0)];
         doc.wires.push(w);
 
-        assert!(Netlist::from_sch_document(&doc).nets.is_empty());
+        // Default mode: the two entries form a net with no pins, reported
+        // structurally (the wire joins two child sheets).
+        let nl = Netlist::from_sch_document(&doc);
+        assert_eq!(nl.nets.len(), 1);
+        assert_eq!(nl.nets[0].name, "N00001");
+        assert!(nl.nets[0].connections.is_empty());
+        let entries: Vec<(&str, &str)> = nl.nets[0]
+            .sheet_entries
+            .iter()
+            .map(|e| (e.sheet_symbol.as_str(), e.entry.as_str()))
+            .collect();
+        assert_eq!(entries, vec![("IO240_1", "RESET_N"), ("SUPERVISOR", "SYS_RESET_N")]);
+
         let nl = Netlist::from_sch_document_with(
             &doc,
             &SchNetlistOptions {
@@ -2077,5 +2345,217 @@ mod tests {
         doc.components.push(comp);
         let nl = Netlist::from_sch_document(&doc);
         assert_eq!(nl.components[0].footprint.as_deref(), Some("SMTSO3050"));
+    }
+    #[test]
+    fn schdoc_netlist_reports_sheet_entries_per_net_via_owner_index() {
+        // A hierarchical top sheet: sheet symbol ADC with its top-left
+        // corner at (300,1320) DXP, 160 x 140. Entry IN_P sits on the left
+        // edge in slot 2 -> (300,1300); CS_P on the right edge in slot 11 ->
+        // (460,1210); SPARE (slot 8) touches nothing. The RECORD=32/33
+        // annotations share OWNERINDEX 704 with the entries and are parked
+        // far away, so only the owner link can find them; a decoy annotation
+        // sits where proximity would look.
+        let mut doc = sch::Document::default();
+        let mut sym = sch::primitives::SheetSymbol::default();
+        sym.location = dxp_pt(300.0, 1320.0);
+        sym.x_size = dxp(160.0);
+        sym.y_size = dxp(140.0);
+        for (name, side, slot, io_type) in [
+            ("IN_P", 0, 2.0, 1),
+            ("CS_P", 1, 11.0, 1),
+            ("SPARE", 1, 8.0, 2),
+        ] {
+            let mut e = sch::primitives::SheetEntry::default();
+            e.name = name.into();
+            e.side = side;
+            e.distance_from_top = dxp(10.0 * slot);
+            e.io_type = io_type;
+            e.common.owner_index = 704;
+            sym.entries.push(e);
+        }
+        doc.sheet_symbols.push(sym);
+        let ann = |x: i32, y: i32, owner: i32, text: &str| {
+            let mut a = BTreeMap::new();
+            a.insert("Location.X".to_string(), x.to_string());
+            a.insert("Location.Y".to_string(), y.to_string());
+            a.insert("OwnerIndex".to_string(), owner.to_string());
+            a.insert("Text".to_string(), text.to_string());
+            a
+        };
+        doc.sheet_name_annotations.push(ann(300, 1330, 999, "DECOY"));
+        doc.sheet_name_annotations.push(ann(2000, 2000, 704, "ADC"));
+        doc.sheet_filename_annotations.push(ann(2000, 1990, 704, "ADC.SchDoc"));
+
+        // IN_P: an unlabelled wire from the entry to J1-A1.
+        doc.components.push(placed(
+            "J1",
+            "CONN",
+            vec![pin_at("A1", dxp_pt(100.0, 1300.0), PinOrientation::Right, 1000.0)],
+        ));
+        let mut w = Wire::default();
+        w.vertices = vec![dxp_pt(200.0, 1300.0), dxp_pt(300.0, 1300.0)];
+        doc.wires.push(w);
+        // CS_P: a label on the entry point, its twin on the wire to U2-A3.
+        let mut label = NetLabel::default();
+        label.text = "ADC_CS_P".into();
+        label.location = dxp_pt(460.0, 1210.0);
+        doc.net_labels.push(label);
+        doc.components.push(placed(
+            "U2",
+            "MCU",
+            vec![pin_at("A3", dxp_pt(700.0, 1000.0), PinOrientation::Left, 1000.0)],
+        ));
+        let mut w = Wire::default();
+        w.vertices = vec![dxp_pt(550.0, 1000.0), dxp_pt(600.0, 1000.0)];
+        doc.wires.push(w);
+        let mut label = NetLabel::default();
+        label.text = "ADC_CS_P".into();
+        label.location = dxp_pt(575.0, 1000.0);
+        doc.net_labels.push(label);
+
+        let nl = Netlist::from_sch_document(&doc);
+        let names: Vec<&str> = nl.nets.iter().map(|n| n.name.as_str()).collect();
+        assert_eq!(names, vec!["ADC_CS_P", "N00001"], "SPARE alone is not a net");
+
+        let cs = &nl.nets[0];
+        assert_eq!(
+            cs.connections,
+            vec![NetConnection {
+                designator: "U2".into(),
+                pad: "A3".into(),
+            }],
+            "default mode keeps `connections` to real pins"
+        );
+        assert_eq!(
+            cs.sheet_entries,
+            vec![NetSheetEntry {
+                sheet_symbol: "ADC".into(),
+                file_name: Some("ADC.SchDoc".into()),
+                entry: "CS_P".into(),
+                io_type: 1,
+            }]
+        );
+        assert!(cs.ports.is_empty());
+
+        // A pin whose only neighbour is a sheet entry leaves the sheet: kept.
+        let auto = &nl.nets[1];
+        assert_eq!(auto.connections.len(), 1);
+        assert_eq!(auto.connections[0].designator, "J1");
+        assert_eq!(auto.sheet_entries.len(), 1);
+        assert_eq!(auto.sheet_entries[0].entry, "IN_P");
+        assert_eq!(auto.sheet_entries[0].sheet_symbol, "ADC");
+
+        let json = nl.to_json();
+        assert!(json.contains("\"sheet_entries\": [\n        {\"sheet_symbol\": \"ADC\", \"file_name\": \"ADC.SchDoc\", \"entry\": \"CS_P\", \"io_type\": 1}"), "{json}");
+        assert!(json.contains("\"ports\": [\n      ]"), "{json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["nets"][0]["sheet_entries"][0]["sheet_symbol"], "ADC");
+
+        // The opt-in flag folds the same entries into `connections`; the
+        // structured arrays stay.
+        let nl = Netlist::from_sch_document_with(
+            &doc,
+            &SchNetlistOptions {
+                include_sheet_entries: true,
+                ..Default::default()
+            },
+        );
+        let cs = nl.nets.iter().find(|n| n.name == "ADC_CS_P").unwrap();
+        let conns: Vec<(&str, &str)> = cs
+            .connections
+            .iter()
+            .map(|c| (c.designator.as_str(), c.pad.as_str()))
+            .collect();
+        assert_eq!(conns, vec![("ADC", "CS_P"), ("U2", "A3")]);
+        assert_eq!(cs.sheet_entries.len(), 1);
+    }
+
+    #[test]
+    fn schdoc_netlist_reports_ports_per_net() {
+        let mut doc = sch::Document::default();
+        doc.components.push(placed(
+            "R1",
+            "R0402",
+            vec![pin_at("1", coord_pt(0.0, 0.0), PinOrientation::Right, 10.0)],
+        ));
+        let mut w = Wire::default();
+        w.vertices = vec![coord_pt(10.0, 0.0), coord_pt(100.0, 0.0)];
+        doc.wires.push(w);
+        let mut port = sch::primitives::Port::default();
+        port.name = "RESET_N".into();
+        port.io_type = 2;
+        port.location = coord_pt(100.0, 0.0);
+        port.width = Coord::from_mils(50.0);
+        doc.ports.push(port);
+        // A port touching nothing is still not a net.
+        let mut lonely = sch::primitives::Port::default();
+        lonely.name = "LONELY".into();
+        lonely.location = coord_pt(500.0, 500.0);
+        lonely.width = Coord::from_mils(50.0);
+        doc.ports.push(lonely);
+
+        let nl = Netlist::from_sch_document(&doc);
+        assert_eq!(nl.nets.len(), 1);
+        let net = &nl.nets[0];
+        assert_eq!(net.name, "RESET_N");
+        assert_eq!(net.connections.len(), 1, "no pseudo-pins without the flag");
+        assert_eq!(
+            net.ports,
+            vec![NetPort {
+                name: "RESET_N".into(),
+                io_type: 2,
+            }]
+        );
+        assert!(net.sheet_entries.is_empty());
+        let json = nl.to_json();
+        assert!(json.contains("\"ports\": [\n        {\"name\": \"RESET_N\", \"io_type\": 2}"), "{json}");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(parsed["nets"][0]["ports"][0]["name"], "RESET_N");
+        assert_eq!(parsed["nets"][0]["sheet_entries"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn sheet_symbol_identity_falls_back_to_annotation_geometry() {
+        // Hand-built entries carry owner_index 0, so the RECORD=32 label one
+        // grid above the top-left corner and the RECORD=33 label on the
+        // corner itself identify the symbol.
+        let mut doc = sch::Document::default();
+        let mut sym = sch::primitives::SheetSymbol::default();
+        sym.location = dxp_pt(460.0, 630.0);
+        sym.x_size = dxp(160.0);
+        sym.y_size = dxp(130.0);
+        let mut e = sch::primitives::SheetEntry::default();
+        e.name = "SYNC".into();
+        e.side = 0;
+        e.distance_from_top = dxp(20.0);
+        sym.entries.push(e);
+        doc.sheet_symbols.push(sym);
+        for (list, y, text) in [
+            (&mut doc.sheet_name_annotations, 640, "PSU"),
+            (&mut doc.sheet_filename_annotations, 630, "PSU.SchDoc"),
+        ] {
+            let mut a = BTreeMap::new();
+            a.insert("Location.X".to_string(), "460".to_string());
+            a.insert("Location.Y".to_string(), y.to_string());
+            a.insert("Text".to_string(), text.to_string());
+            list.push(a);
+        }
+        doc.components.push(placed(
+            "U1",
+            "PMIC",
+            vec![pin_at("7", dxp_pt(360.0, 610.0), PinOrientation::Right, 1000.0)],
+        ));
+
+        let nl = Netlist::from_sch_document(&doc);
+        assert_eq!(nl.nets.len(), 1);
+        assert_eq!(
+            nl.nets[0].sheet_entries,
+            vec![NetSheetEntry {
+                sheet_symbol: "PSU".into(),
+                file_name: Some("PSU.SchDoc".into()),
+                entry: "SYNC".into(),
+                io_type: 0,
+            }]
+        );
     }
 }

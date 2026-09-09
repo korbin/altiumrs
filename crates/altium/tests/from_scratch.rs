@@ -545,6 +545,47 @@ fn schlib_part_count_round_trips_for_multi_part_components() {
 }
 
 #[test]
+fn schlib_file_header_component_list_follows_the_components() {
+    // Regression test: a library read from a file carries its FileHeader
+    // parameters (CompCount, LibRefN, CompDescrN, PartCountN). Writing it
+    // after adding or removing components must regenerate that list, or the
+    // added component is written but never listed and a removed one lingers.
+    let mut lib = altium::sch::Library::default();
+    let mut first = altium::sch::Component::new("FIRST");
+    first.description = Some("first part".to_string());
+    lib.components.push(first);
+    let mut parsed = altium::sch::Library::from_bytes(lib.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        parsed.file_header_parameters.get("CompCount").map(String::as_str),
+        Some("1")
+    );
+
+    let mut second = altium::sch::Component::new("SECOND");
+    second.description = Some("second part".to_string());
+    parsed.components.push(second);
+    let grown = altium::sch::Library::from_bytes(parsed.to_bytes().unwrap()).unwrap();
+    assert_eq!(grown.components.len(), 2, "the added component must be listed");
+    assert_eq!(grown.file_header_parameters.get("CompCount").map(String::as_str), Some("2"));
+    assert_eq!(grown.file_header_parameters.get("LibRef1").map(String::as_str), Some("SECOND"));
+    assert_eq!(
+        grown.file_header_parameters.get("CompDescr1").map(String::as_str),
+        Some("second part")
+    );
+
+    let mut shrunk_src = grown;
+    shrunk_src.components.remove(0);
+    let shrunk = altium::sch::Library::from_bytes(shrunk_src.to_bytes().unwrap()).unwrap();
+    assert_eq!(shrunk.components.len(), 1);
+    assert_eq!(shrunk.components[0].name, "SECOND");
+    assert_eq!(shrunk.file_header_parameters.get("CompCount").map(String::as_str), Some("1"));
+    assert_eq!(shrunk.file_header_parameters.get("LibRef0").map(String::as_str), Some("SECOND"));
+    assert!(
+        shrunk.file_header_parameters.get("LibRef1").is_none(),
+        "the removed component must not linger in the header"
+    );
+}
+
+#[test]
 fn schlib_component_default_carries_altium_placeholders() {
     let comp = altium::sch::Component::new("X");
     assert_eq!(

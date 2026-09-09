@@ -69,38 +69,55 @@ impl BomDocument {
         Self::from_bytes(bytes)
     }
 
+    /// Parse the decoded text of a BomDoc.
+    ///
+    /// Records are line-oriented, but a field value may itself contain a
+    /// line break (Altium writes multi-line `DESCRIPTION` texts verbatim,
+    /// and repeats them inside the quoted `SELECTEDPARAMETERSHASH`). A
+    /// physical line that does not start with the `RECORD=` prefix is
+    /// therefore a continuation of the previous record and is rejoined with
+    /// the file's own terminator (`\r\n` or `\n`), blank lines included.
+    /// Only a first line without the prefix is an error.
     pub fn parse(text: &str) -> Result<Self> {
         let mut records = Vec::new();
+        // The record being assembled: (1-based line number of its first
+        // physical line, text so far).
+        let mut current: Option<(usize, String)> = None;
+        // Terminator of the last physical line appended to `current`, plus
+        // the terminators of any blank lines seen since — replayed verbatim
+        // if a continuation line follows, dropped otherwise.
+        let mut pending = String::new();
         for (lineno, raw_line) in text.split_inclusive('\n').enumerate() {
             let line = raw_line.trim_end_matches(['\r', '\n']);
-            if line.is_empty() {
-                continue;
-            }
-            let params = ParameterMap::parse(line);
-            let Some(kind) = params.get("RECORD") else {
-                return Err(Error::corrupt(format!(
-                    "BomDoc line {} missing RECORD= prefix",
-                    lineno + 1
-                )));
-            };
-            let kind = kind.to_string();
-            // Re-emit without the leading RECORD= so .parameters carries only
-            // the remaining fields. Keeps round-trip clean.
-            let mut without_record = ParameterMap::new();
-            for (name, value, is_utf8) in params.iter() {
-                if name.eq_ignore_ascii_case("RECORD") {
-                    continue;
+            let terminator = &raw_line[line.len()..];
+            if is_record_start(line) {
+                if let Some((start, body)) = current.take() {
+                    records.push(parse_record(start, &body)?);
                 }
-                if is_utf8 {
-                    without_record.insert_utf8(name, value);
-                } else {
-                    without_record.insert(name, value);
+                pending.clear();
+                pending.push_str(terminator);
+                current = Some((lineno + 1, line.to_string()));
+            } else if line.is_empty() {
+                pending.push_str(terminator);
+            } else {
+                match current.as_mut() {
+                    Some((_, body)) => {
+                        body.push_str(&pending);
+                        body.push_str(line);
+                        pending.clear();
+                        pending.push_str(terminator);
+                    }
+                    None => {
+                        return Err(Error::corrupt(format!(
+                            "BomDoc line {} missing RECORD= prefix",
+                            lineno + 1
+                        )));
+                    }
                 }
             }
-            records.push(BomRecord {
-                kind,
-                parameters: without_record,
-            });
+        }
+        if let Some((start, body)) = current.take() {
+            records.push(parse_record(start, &body)?);
         }
         Ok(Self { records })
     }
@@ -267,6 +284,42 @@ impl<'a> BomItem<'a> {
             "Library Reference",
         )
     }
+}
+
+/// Whether a physical line opens a new record: `RECORD=` or `|RECORD=`
+/// (case-insensitive, like every other parameter key).
+fn is_record_start(line: &str) -> bool {
+    let body = line.strip_prefix('|').unwrap_or(line);
+    body.get(..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("RECORD="))
+}
+
+/// Parse one logical record (all its physical lines already rejoined).
+fn parse_record(lineno: usize, line: &str) -> Result<BomRecord> {
+    let params = ParameterMap::parse(line);
+    let Some(kind) = params.get("RECORD") else {
+        return Err(Error::corrupt(format!(
+            "BomDoc line {lineno} missing RECORD= prefix"
+        )));
+    };
+    let kind = kind.to_string();
+    // Re-emit without the leading RECORD= so .parameters carries only the
+    // remaining fields. Keeps round-trip clean.
+    let mut without_record = ParameterMap::new();
+    for (name, value, is_utf8) in params.iter() {
+        if name.eq_ignore_ascii_case("RECORD") {
+            continue;
+        }
+        if is_utf8 {
+            without_record.insert_utf8(name, value);
+        } else {
+            without_record.insert(name, value);
+        }
+    }
+    Ok(BomRecord {
+        kind,
+        parameters: without_record,
+    })
 }
 
 // CSV-style entry parser for COMPONENTPARAMETERS / CUSTOMPARAMETERS.
@@ -480,5 +533,70 @@ mod tests {
         assert_eq!(it.supplier_part_number().as_deref(), Some("SP-1"));
         assert_eq!(it.value().as_deref(), Some("10k"));
         assert_eq!(it.library_reference().as_deref(), Some("R10K"));
+    }
+    #[test]
+    fn rejoins_record_split_by_embedded_crlf() {
+        // Seen in the wild: a DESCRIPTION carrying a CRLF, repeated inside
+        // the quoted SELECTEDPARAMETERSHASH, so one record spans three
+        // physical lines. A blank physical line inside a value must survive
+        // too.
+        let text = "|RECORD=BOM|VERSION=6|KIND=ALTIUM_DESIGNER_LIVEBOM\r\n\
+                    |RECORD=CatalogItem|UNIQUEID=Lib.SchLib\\ATT1|DESIGNITEMID=ATT1|DESCRIPTION=Step attenuator\r\n\
+                    DC to 6 GHz|USERCOMMENTS=ATT1|SELECTEDPARAMETERSHASH=\"Step attenuator\r\n\
+                    \r\n\
+                    DC to 6 GHz\"|COMPONENTPARAMETERS=Comment=ATT1\r\n\
+                    |RECORD=CatalogItem|UNIQUEID=Lib\\R1|DESIGNITEMID=R1|DESCRIPTION=10k\r\n";
+        let doc = BomDocument::parse(text).unwrap();
+        assert_eq!(doc.records.len(), 3, "continuation lines must not become records");
+        let items: Vec<_> = doc.items().collect();
+        assert_eq!(items.len(), 2);
+        let att = items[0];
+        assert_eq!(att.design_item_id(), "ATT1");
+        assert_eq!(att.description(), "Step attenuator\r\nDC to 6 GHz");
+        assert_eq!(att.user_comments(), "ATT1");
+        assert_eq!(
+            att.record.get("SELECTEDPARAMETERSHASH"),
+            Some("\"Step attenuator\r\n\r\nDC to 6 GHz\""),
+            "blank line inside the quoted value is preserved"
+        );
+        assert_eq!(att.comment().as_deref(), Some("ATT1"));
+        assert_eq!(items[1].design_item_id(), "R1");
+
+        // Round trip re-emits the embedded breaks verbatim.
+        let bytes = doc.to_bytes().unwrap();
+        assert_eq!(String::from_utf8(bytes.clone()).unwrap(), text);
+        assert_eq!(BomDocument::from_bytes(bytes).unwrap(), doc);
+    }
+
+    #[test]
+    fn rejoins_record_split_by_embedded_lf() {
+        // LF-only file: the continuation is rejoined with a bare LF.
+        let text = "RECORD=BOM|VERSION=6\n\
+                    RECORD=CatalogItem|UNIQUEID=X|DESCRIPTION=line one\n\
+                    line two|USERCOMMENTS=u\n";
+        let doc = BomDocument::parse(text).unwrap();
+        assert_eq!(doc.records.len(), 2);
+        let it = doc.items().next().unwrap();
+        assert_eq!(it.description(), "line one\nline two");
+        assert_eq!(it.user_comments(), "u");
+    }
+
+    #[test]
+    fn non_utf8_cp1252_bytes_decode_lossily() {
+        // 0xB5 is MICRO SIGN in Windows-1252; the file is not valid UTF-8.
+        let mut bytes = b"|RECORD=CatalogItem|UNIQUEID=C1|DESCRIPTION=10 ".to_vec();
+        bytes.push(0xB5);
+        bytes.extend_from_slice(b"F\r\n");
+        let doc = BomDocument::from_bytes(bytes).unwrap();
+        assert_eq!(doc.items().next().unwrap().description(), "10 \u{b5}F");
+    }
+
+    #[test]
+    fn first_line_without_record_prefix_is_still_an_error() {
+        let err = BomDocument::parse("garbage line\r\n|RECORD=BOM|VERSION=6\r\n").unwrap_err();
+        assert!(err.to_string().contains("line 1"), "got: {err}");
+        // Leading blank lines are tolerated; the offending line is reported.
+        let err = BomDocument::parse("\r\n\r\nnope|RECORD=BOM\r\n").unwrap_err();
+        assert!(err.to_string().contains("line 3"), "got: {err}");
     }
 }
