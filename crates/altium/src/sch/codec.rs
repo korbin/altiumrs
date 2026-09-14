@@ -13,6 +13,10 @@ use super::primitives::{
     Polygon, Polyline, Port, PowerObject, PrimitiveCommon, Rectangle, RoundedRectangle, SheetEntry,
     SheetSymbol, SignalHarness, Symbol, TextFrame, Wire,
 };
+use super::binary::{
+    PIN_TEXT_FLAG_FONT, PIN_TEXT_FLAG_POSITION, PIN_TEXT_FLAG_ROTATION_ANCHOR,
+    PIN_TEXT_FLAG_ROTATION_RELATIVE,
+};
 use crate::coord::{Coord, CoordPoint};
 use crate::dto::sch as dto;
 use crate::enums::{PinElectricalType, PinOrientation, PowerPortStyle, TextJustification};
@@ -22,6 +26,7 @@ use crate::parameter::{ParameterMap, format_bool_long};
 
 pub fn component_apply_record(component: &mut Component, params: &ParameterMap) {
     let d = dto::ComponentDto::from_params(params);
+    component.extra = d.extra.clone();
     component.location = CoordPoint::new(
         coord_from_dxp_frac(d.location_x, d.location_x_frac),
         coord_from_dxp_frac(d.location_y, d.location_y_frac),
@@ -101,6 +106,7 @@ pub fn component_apply_record(component: &mut Component, params: &ParameterMap) 
 
 pub fn component_to_record_params(component: &Component, params: &mut ParameterMap) {
     let mut d = dto::ComponentDto::default();
+    d.extra = component.extra.clone();
     let (lx, lxf) = coord_to_dxp_frac(component.location.x);
     let (ly, lyf) = coord_to_dxp_frac(component.location.y);
     d.location_x = lx;
@@ -328,11 +334,7 @@ pub fn pin_from_params(params: &ParameterMap) -> Pin {
         symbol_inside: d.symbol_inside,
         symbol_outside: d.symbol_outside,
         symbol_line_width: d.symbol_line_width,
-        swap_id_part: if d.swap_id_part != 0 {
-            Some(d.swap_id_part.to_string())
-        } else {
-            None
-        },
+        swap_id_part: d.swap_id_part.clone(),
         pin_propagation_delay: d.pin_propagation_delay as i32,
         designator_custom_font_id: d.designator_custom_font_id,
         name_custom_font_id: d.name_custom_font_id,
@@ -343,17 +345,37 @@ pub fn pin_from_params(params: &ParameterMap) -> Pin {
         is_hidden: d.is_hidden,
         designator_custom_color: d.designator_custom_color,
         designator_custom_position_margin: d.designator_custom_position_margin,
-        designator_custom_position_rotation_anchor: d.designator_custom_position_rotation_anchor,
-        designator_custom_position_rotation_relative: d
-            .designator_custom_position_rotation_relative,
-        designator_font_mode: d.designator_font_mode,
-        designator_position_mode: d.designator_position_mode,
+        designator_custom_position_rotation_anchor: i32::from(pin_text_flag(
+            d.designator_position_conglomerate,
+            PIN_TEXT_FLAG_ROTATION_ANCHOR,
+        )),
+        designator_custom_position_rotation_relative: pin_text_flag(
+            d.designator_position_conglomerate,
+            PIN_TEXT_FLAG_ROTATION_RELATIVE,
+        ),
+        designator_font_mode: i32::from(pin_text_flag(
+            d.designator_position_conglomerate,
+            PIN_TEXT_FLAG_FONT,
+        )),
+        designator_position_mode: i32::from(pin_text_flag(
+            d.designator_position_conglomerate,
+            PIN_TEXT_FLAG_POSITION,
+        )),
         name_custom_color: d.name_custom_color,
         name_custom_position_margin: d.name_custom_position_margin,
-        name_custom_position_rotation_anchor: d.name_custom_position_rotation_anchor,
-        name_custom_position_rotation_relative: d.name_custom_position_rotation_relative,
-        name_font_mode: d.name_font_mode,
-        name_position_mode: d.name_position_mode,
+        name_custom_position_rotation_anchor: i32::from(pin_text_flag(
+            d.name_position_conglomerate,
+            PIN_TEXT_FLAG_ROTATION_ANCHOR,
+        )),
+        name_custom_position_rotation_relative: pin_text_flag(
+            d.name_position_conglomerate,
+            PIN_TEXT_FLAG_ROTATION_RELATIVE,
+        ),
+        name_font_mode: i32::from(pin_text_flag(d.name_position_conglomerate, PIN_TEXT_FLAG_FONT)),
+        name_position_mode: i32::from(pin_text_flag(
+            d.name_position_conglomerate,
+            PIN_TEXT_FLAG_POSITION,
+        )),
         swap_id_pair: d.swap_id_pair.clone(),
         swap_id_part_pin: d.swap_id_part_pin.clone(),
         swap_id_pin: d.swap_id_pin.clone(),
@@ -395,11 +417,7 @@ pub fn pin_to_params(pin: &Pin, params: &mut ParameterMap) {
     d.symbol_inside = pin.symbol_inside;
     d.symbol_outside = pin.symbol_outside;
     d.symbol_line_width = pin.symbol_line_width;
-    d.swap_id_part = pin
-        .swap_id_part
-        .as_deref()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
+    d.swap_id_part = pin.swap_id_part.clone();
     d.pin_propagation_delay = pin.pin_propagation_delay as f64;
     d.designator_custom_font_id = pin.designator_custom_font_id;
     d.name_custom_font_id = pin.name_custom_font_id;
@@ -409,17 +427,22 @@ pub fn pin_to_params(pin: &Pin, params: &mut ParameterMap) {
     d.is_hidden = pin.is_hidden;
     d.designator_custom_color = pin.designator_custom_color;
     d.designator_custom_position_margin = pin.designator_custom_position_margin;
-    d.designator_custom_position_rotation_anchor = pin.designator_custom_position_rotation_anchor;
-    d.designator_custom_position_rotation_relative =
-        pin.designator_custom_position_rotation_relative;
-    d.designator_font_mode = pin.designator_font_mode;
-    d.designator_position_mode = pin.designator_position_mode;
+    d.designator_position_conglomerate = pin_text_conglomerate(
+        pin.designator_font_mode,
+        pin.designator_custom_font_id,
+        pin.designator_position_mode,
+        pin.designator_custom_position_rotation_anchor,
+        pin.designator_custom_position_rotation_relative,
+    );
     d.name_custom_color = pin.name_custom_color;
     d.name_custom_position_margin = pin.name_custom_position_margin;
-    d.name_custom_position_rotation_anchor = pin.name_custom_position_rotation_anchor;
-    d.name_custom_position_rotation_relative = pin.name_custom_position_rotation_relative;
-    d.name_font_mode = pin.name_font_mode;
-    d.name_position_mode = pin.name_position_mode;
+    d.name_position_conglomerate = pin_text_conglomerate(
+        pin.name_font_mode,
+        pin.name_custom_font_id,
+        pin.name_position_mode,
+        pin.name_custom_position_rotation_anchor,
+        pin.name_custom_position_rotation_relative,
+    );
     d.swap_id_pair = pin.swap_id_pair.clone();
     d.swap_id_part_pin = pin.swap_id_part_pin.clone();
     d.swap_id_pin = pin.swap_id_pin.clone();
@@ -428,6 +451,51 @@ pub fn pin_to_params(pin: &Pin, params: &mut ParameterMap) {
     d.pin_package_length = pkg;
     d.apply_common_from(&pin.common);
     d.to_params(params);
+    // Written on every pin, in the fixed-exponent form the vendor uses.
+    params.insert(
+        "PINPROPAGATIONDELAY",
+        altium_exponent_format(f64::from(pin.pin_propagation_delay)),
+    );
+}
+
+fn pin_text_flag(conglomerate: i32, flag: u8) -> bool {
+    (conglomerate as u32) & u32::from(flag) != 0
+}
+
+/// The flag byte a text pin record carries for its name or designator
+/// text; the same bit layout as the library sidecar stream. A custom font
+/// counts only when both the mode and a font id are set.
+fn pin_text_conglomerate(
+    font_mode: i32,
+    font_id: i32,
+    position_mode: i32,
+    rotation_anchor: i32,
+    rotation_relative: bool,
+) -> i32 {
+    let mut flags = 0u8;
+    if position_mode != 0 {
+        flags |= PIN_TEXT_FLAG_POSITION;
+    }
+    if rotation_anchor != 0 {
+        flags |= PIN_TEXT_FLAG_ROTATION_ANCHOR;
+    }
+    if rotation_relative {
+        flags |= PIN_TEXT_FLAG_ROTATION_RELATIVE;
+    }
+    if font_mode != 0 && font_id != 0 {
+        flags |= PIN_TEXT_FLAG_FONT;
+    }
+    i32::from(flags)
+}
+
+/// `1.500000E+002` style: six decimals, explicit exponent sign, three
+/// exponent digits.
+fn altium_exponent_format(v: f64) -> String {
+    let s = format!("{v:.6E}");
+    let (mantissa, exp) = s.split_once('E').unwrap_or((&s, "0"));
+    let exp: i32 = exp.parse().unwrap_or(0);
+    let sign = if exp < 0 { '-' } else { '+' };
+    format!("{mantissa}E{sign}{:03}", exp.abs())
 }
 
 // Line
@@ -1016,6 +1084,7 @@ pub fn parameter_from_params(params: &ParameterMap) -> Parameter {
         show_name: d.show_name,
         is_mirrored: d.is_mirrored,
         is_read_only: d.read_only_state != 0,
+        read_only_state: d.read_only_state,
         description: d.description.clone(),
         area_color: d.area_color,
         auto_position: d.auto_position,
@@ -1062,7 +1131,11 @@ pub fn parameter_to_params(p: &Parameter, params: &mut ParameterMap) {
     d.show_name = p.show_name;
     d.is_mirrored = p.is_mirrored;
     d.is_hidden = !p.is_visible;
-    d.read_only_state = if p.is_read_only { 1 } else { 0 };
+    d.read_only_state = if p.read_only_state != 0 {
+        p.read_only_state
+    } else {
+        i32::from(p.is_read_only)
+    };
     d.area_color = p.area_color;
     d.auto_position = p.auto_position;
     d.is_configurable = p.is_configurable;
@@ -1308,7 +1381,7 @@ pub fn no_erc_from_params(params: &ParameterMap) -> NoErc {
         orientation: d.orientation,
         color: d.color,
         is_active: d.is_active,
-        symbol: d.symbol,
+        symbol: d.symbol.clone(),
         area_color: d.area_color,
         suppress_all: d.suppress_all,
         error_kind_set_to_suppress: d.error_kind_set_to_suppress.clone(),
@@ -1327,7 +1400,7 @@ pub fn no_erc_to_params(n: &NoErc, params: &mut ParameterMap) {
     d.orientation = n.orientation;
     d.color = n.color;
     d.is_active = n.is_active;
-    d.symbol = n.symbol;
+    d.symbol = n.symbol.clone();
     d.area_color = n.area_color;
     d.suppress_all = n.suppress_all;
     d.error_kind_set_to_suppress = n.error_kind_set_to_suppress.clone();
@@ -1480,7 +1553,7 @@ pub fn sheet_symbol_from_params(params: &ParameterMap) -> SheetSymbol {
         area_color: d.area_color,
         is_solid: d.is_solid,
         show_hidden_fields: d.show_hidden_fields,
-        symbol_type: d.symbol_type,
+        symbol_type: d.symbol_type.clone(),
         design_item_id: d.design_item_id.clone(),
         item_guid: d.item_guid.clone(),
         lib_identifier_kind: d.lib_identifier_kind,
@@ -1512,7 +1585,7 @@ pub fn sheet_symbol_to_params(s: &SheetSymbol, params: &mut ParameterMap) {
     d.area_color = s.area_color;
     d.is_solid = s.is_solid;
     d.show_hidden_fields = s.show_hidden_fields;
-    d.symbol_type = s.symbol_type;
+    d.symbol_type = s.symbol_type.clone();
     d.design_item_id = s.design_item_id.clone();
     d.item_guid = s.item_guid.clone();
     d.lib_identifier_kind = s.lib_identifier_kind;
@@ -1535,14 +1608,14 @@ pub fn sheet_entry_from_params(params: &ParameterMap) -> SheetEntry {
         name: d.name.clone().unwrap_or_default(),
         io_type: d.io_type,
         style: d.style,
-        arrow_kind: d.arrow_kind,
+        arrow_kind: d.arrow_kind.clone(),
         harness_type: d.harness_type.clone(),
         harness_color: d.harness_color,
         font_id: d.font_id,
         color: d.color,
         area_color: d.area_color,
         text_color: d.text_color,
-        text_style: d.text_style,
+        text_style: d.text_style.clone(),
         common: d.extract_common(),
     }
 }
@@ -1558,14 +1631,14 @@ pub fn sheet_entry_to_params(e: &SheetEntry, params: &mut ParameterMap) {
     };
     d.io_type = e.io_type;
     d.style = e.style;
-    d.arrow_kind = e.arrow_kind;
+    d.arrow_kind = e.arrow_kind.clone();
     d.harness_type = e.harness_type.clone();
     d.harness_color = e.harness_color;
     d.font_id = e.font_id;
     d.color = e.color;
     d.area_color = e.area_color;
     d.text_color = e.text_color;
-    d.text_style = e.text_style;
+    d.text_style = e.text_style.clone();
     d.apply_common_from(&e.common);
     d.to_params(params);
 }
@@ -1766,6 +1839,8 @@ fn common_record_from_params(params: &ParameterMap) -> PrimitiveCommon {
         disabled: params.get_bool("DISABLED"),
         dimmed: params.get_bool("DIMMED"),
         unique_id: params.get("UNIQUEID").map(str::to_owned),
+        source_index: params.get_i32("__SOURCEINDEX").filter(|v| *v > 0).map(|v| v - 1),
+        extra: Vec::new(),
     }
 }
 

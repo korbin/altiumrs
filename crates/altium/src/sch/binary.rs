@@ -147,12 +147,12 @@ impl SchRecordType {
 /// Decode a binary pin record (`flag = 0x01`) into a parameter map shaped to
 /// match the parameter-form record (so `from_params` works uniformly).
 /// Mirror of [`decode_binary_pin`] for the writer. Produces the raw 37+
-/// byte body that real Altium SchLibs use for pin records (flag = 0x01,
-/// not the ASCII RECORD=2 form). Altium's pin renderer reads font/color
-/// customisations out of the sibling `PinTextData` stream indexed by pin
-/// position; ASCII pin records' `DESIGNATOR.FONTMODE`/`CUSTOMFONTID`
-/// fields are NOT honoured for canvas rendering, so to make `--font`
-/// actually take effect we have to emit the binary form.
+/// byte body that library component streams use for pin records
+/// (flag = 0x01). The binary form has no room for text customisation; in
+/// a library that lives in the sibling `PinTextData` stream, indexed by pin
+/// position. Documents do not have that stream and use the text
+/// (`RECORD=2`) form with the customisation keys inline; binary pins in a
+/// document are not rendered.
 pub fn encode_binary_pin(params: &crate::parameter::ParameterMap) -> Vec<u8> {
     use crate::encoding;
     let mut out = Vec::with_capacity(64);
@@ -271,10 +271,10 @@ pub struct PinTextCustomisation {
     pub color: i32,
 }
 
-const PIN_TEXT_FLAG_POSITION: u8 = 0x01;
-const PIN_TEXT_FLAG_ROTATION_ANCHOR: u8 = 0x02;
-const PIN_TEXT_FLAG_ROTATION_RELATIVE: u8 = 0x04;
-const PIN_TEXT_FLAG_FONT: u8 = 0x10;
+pub(crate) const PIN_TEXT_FLAG_POSITION: u8 = 0x01;
+pub(crate) const PIN_TEXT_FLAG_ROTATION_ANCHOR: u8 = 0x02;
+pub(crate) const PIN_TEXT_FLAG_ROTATION_RELATIVE: u8 = 0x04;
+pub(crate) const PIN_TEXT_FLAG_FONT: u8 = 0x10;
 const PIN_TEXT_KNOWN_FLAGS: u8 = PIN_TEXT_FLAG_POSITION
     | PIN_TEXT_FLAG_ROTATION_ANCHOR
     | PIN_TEXT_FLAG_ROTATION_RELATIVE

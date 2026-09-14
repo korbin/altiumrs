@@ -79,7 +79,7 @@ mod tests {
 
         assert_eq!(params.get("OWNERINDEX"), Some("7"));
         assert_eq!(params.get("FLAG"), Some("T"));
-        assert_eq!(params.get("ANGLE"), Some("1.5"));
+        assert_eq!(params.get("ANGLE"), Some("1.500"));
         assert_eq!(params.get("LABEL"), Some("abc"));
         assert_eq!(params.get("NAME"), Some("xyz"));
         assert_eq!(params.get("WIDTH"), Some("5mil"));

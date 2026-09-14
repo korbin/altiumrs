@@ -8,7 +8,13 @@ pub fn expand(input: &RecordInput) -> TokenStream {
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
     let krate = input.crate_tokens();
 
-    let from_fields = input.fields.iter().map(|f| from_field(f, &krate));
+    let known: Vec<String> = input
+        .fields
+        .iter()
+        .filter(|f| !f.skip && !f.extra)
+        .map(|f| f.param_name.to_uppercase())
+        .collect();
+    let from_fields = input.fields.iter().map(|f| from_field(f, &krate, &known));
     let to_fields = input.fields.iter().map(|f| to_field(f, &krate));
 
     let record_const = input.record_type.as_ref().map(|s| {
@@ -43,11 +49,23 @@ pub fn expand(input: &RecordInput) -> TokenStream {
     }
 }
 
-fn from_field(field: &FieldInput, krate: &TokenStream) -> TokenStream {
+fn from_field(field: &FieldInput, krate: &TokenStream, known: &[String]) -> TokenStream {
     let ident = &field.ident;
     let key = &field.param_name;
     if field.skip {
         return quote! { #ident: ::core::default::Default::default() };
+    }
+    if field.extra {
+        return quote! {
+            #ident: params
+                .iter()
+                .filter(|(n, _, _)| {
+                    let u = n.to_ascii_uppercase();
+                    u != "RECORD" && ![#(#known),*].contains(&u.as_str())
+                })
+                .map(|(n, v, u)| (n.to_string(), v.to_string(), u))
+                .collect()
+        };
     }
     match field.kind {
         FieldKind::Bool => quote! { #ident: params.get_bool(#key) },
@@ -95,6 +113,17 @@ fn to_field(field: &FieldInput, krate: &TokenStream) -> TokenStream {
         return quote! {};
     }
     let ident = &field.ident;
+    if field.extra {
+        return quote! {
+            for (n, v, u) in &self.#ident {
+                if *u {
+                    params.insert_utf8(n, v.clone());
+                } else {
+                    params.insert(n, v.clone());
+                }
+            }
+        };
+    }
     let key = &field.param_name;
     let scratch = format_ident!("__altium_value_{}", ident);
     match field.kind {
@@ -110,7 +139,7 @@ fn to_field(field: &FieldInput, krate: &TokenStream) -> TokenStream {
         },
         FieldKind::Float => quote! {
             if self.#ident != 0.0 {
-                params.insert(#key, ::std::string::ToString::to_string(&self.#ident));
+                params.insert(#key, ::std::format!("{:.3}", self.#ident));
             }
         },
         FieldKind::String => quote! {

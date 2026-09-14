@@ -611,7 +611,9 @@ fn parse_storage_image_data(data: &[u8]) -> Option<Vec<Vec<u8>>> {
 
 // Document reader (.SchDoc)
 
-const SCH_DOC_KNOWN_STREAMS: &[&str] = &["FileHeader", "Storage", "Additional"];
+// `Storage` is not modelled for documents; it is carried in
+// `additional_streams` and written back verbatim.
+const SCH_DOC_KNOWN_STREAMS: &[&str] = &["FileHeader", "Additional"];
 
 impl Document {
     /// Parse a `.SchDoc` from an in-memory buffer.
@@ -682,6 +684,12 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
     let mut br = BinaryReader::new(Cursor::new(data.to_vec()))?;
     let mut current_component: Option<usize> = None;
     let mut current_implementation: Option<(usize, usize)> = None; // (component_idx, impl_idx)
+    // `OWNERINDEX` counts records after the file-header record. Track the
+    // position of each component record so owned primitives can be filed
+    // under the component they name rather than the one last seen.
+    let mut pos: i32 = -1;
+    let mut header_offset: i32 = 0;
+    let mut component_at: BTreeMap<i32, usize> = BTreeMap::new();
     let mut sheet_settings: Option<BTreeMap<String, String>> = None;
     let mut header_parameters: Option<BTreeMap<String, String>> = None;
     let mut template_record: Option<BTreeMap<String, String>> = None;
@@ -690,10 +698,11 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
 
     while br.has_more()? {
         let (flag, body) = br.read_block_with_flags()?;
+        pos += 1;
         if body.is_empty() {
             continue;
         }
-        let params = if flag == 0x01 {
+        let mut params = if flag == 0x01 {
             match decode_binary_pin(&body)? {
                 Some(p) => p,
                 None => {
@@ -707,6 +716,9 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
         };
 
         let record = params.get_i32("RECORD");
+        let owner_component = params
+            .get_i32("OWNERINDEX")
+            .and_then(|o| component_at.get(&o).copied());
 
         // The schematic stream has up to two distinct "header" records before
         // any primitive: a file-header parameter block (no `RECORD` key,
@@ -720,9 +732,15 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 typed.insert(n.to_string(), v.to_string());
             }
             header_parameters = Some(typed);
+            if pos == 0 {
+                header_offset = 1;
+            }
 
             continue;
         }
+        // Reserved key carrying the record's own index (+1) so owner
+        // references can be re-targeted after the writer re-orders records.
+        params.insert("__SOURCEINDEX", (pos - header_offset + 1).to_string());
         if record == Some(31) && sheet_settings.is_none() {
             let mut typed = BTreeMap::new();
             for (n, v, _) in params.iter() {
@@ -772,9 +790,12 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 document.components.push(component);
                 current_component = Some(document.components.len() - 1);
                 current_implementation = None;
+                component_at.insert(pos - header_offset, document.components.len() - 1);
             }
             Some(SchRecordType::Pin) => {
-                if let Some(idx) = current_component {
+                // Text pins name their owner; binary pins do not and belong
+                // to the component last seen.
+                if let Some(idx) = owner_component.or(current_component) {
                     document.components[idx]
                         .pins
                         .push(codec::pin_from_params(&params));
@@ -783,7 +804,7 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 }
             }
             Some(SchRecordType::Symbol) => {
-                if let Some(idx) = current_component {
+                if let Some(idx) = owner_component {
                     document.components[idx]
                         .symbols
                         .push(codec::symbol_from_params(&params));
@@ -792,45 +813,81 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 }
             }
             Some(SchRecordType::Label) => {
-                document.labels.push(codec::label_from_params(&params));
+                let v = codec::label_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].labels.push(v),
+                    None => document.labels.push(v),
+                }
             }
             Some(SchRecordType::Bezier) => {
-                document.beziers.push(codec::bezier_from_params(&params));
+                let v = codec::bezier_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].beziers.push(v),
+                    None => document.beziers.push(v),
+                }
             }
             Some(SchRecordType::Polyline) => {
-                document
-                    .polylines
-                    .push(codec::polyline_from_params(&params));
+                let v = codec::polyline_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].polylines.push(v),
+                    None => document.polylines.push(v),
+                }
             }
             Some(SchRecordType::Polygon) => {
-                document.polygons.push(codec::polygon_from_params(&params));
+                let v = codec::polygon_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].polygons.push(v),
+                    None => document.polygons.push(v),
+                }
             }
             Some(SchRecordType::Ellipse) => {
-                document.ellipses.push(codec::ellipse_from_params(&params));
+                let v = codec::ellipse_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].ellipses.push(v),
+                    None => document.ellipses.push(v),
+                }
             }
             Some(SchRecordType::Pie) => {
-                document.pies.push(codec::pie_from_params(&params));
+                let v = codec::pie_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].pies.push(v),
+                    None => document.pies.push(v),
+                }
             }
             Some(SchRecordType::RoundedRectangle) => {
-                document
-                    .rounded_rectangles
-                    .push(codec::rounded_rectangle_from_params(&params));
+                let v = codec::rounded_rectangle_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].rounded_rectangles.push(v),
+                    None => document.rounded_rectangles.push(v),
+                }
             }
             Some(SchRecordType::EllipticalArc) => {
-                document
-                    .elliptical_arcs
-                    .push(codec::elliptical_arc_from_params(&params));
+                let v = codec::elliptical_arc_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].elliptical_arcs.push(v),
+                    None => document.elliptical_arcs.push(v),
+                }
             }
             Some(SchRecordType::Arc) => {
-                document.arcs.push(codec::arc_from_params(&params));
+                let v = codec::arc_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].arcs.push(v),
+                    None => document.arcs.push(v),
+                }
             }
             Some(SchRecordType::Line) => {
-                document.lines.push(codec::line_from_params(&params));
+                let v = codec::line_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].lines.push(v),
+                    None => document.lines.push(v),
+                }
             }
             Some(SchRecordType::Rectangle) => {
-                document
-                    .rectangles
-                    .push(codec::rectangle_from_params(&params));
+                let v = codec::rectangle_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].rectangles.push(v),
+                    None => document.rectangles.push(v),
+                }
             }
             Some(SchRecordType::SheetSymbol) => {
                 document
@@ -845,9 +902,11 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 document.sheet_entries.push(entry);
             }
             Some(SchRecordType::PowerObject) => {
-                document
-                    .power_objects
-                    .push(codec::power_object_from_params(&params));
+                let v = codec::power_object_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].power_objects.push(v),
+                    None => document.power_objects.push(v),
+                }
             }
             Some(SchRecordType::Port) => {
                 document.ports.push(codec::port_from_params(&params));
@@ -882,28 +941,42 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 document.no_ercs.push(codec::no_erc_from_params(&params));
             }
             Some(SchRecordType::NetLabel) => {
-                document
-                    .net_labels
-                    .push(codec::net_label_from_params(&params));
+                let v = codec::net_label_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].net_labels.push(v),
+                    None => document.net_labels.push(v),
+                }
             }
             Some(SchRecordType::Bus) => {
                 document.buses.push(codec::bus_from_params(&params));
             }
             Some(SchRecordType::Wire) => {
-                document.wires.push(codec::wire_from_params(&params));
+                let v = codec::wire_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].wires.push(v),
+                    None => document.wires.push(v),
+                }
             }
             Some(SchRecordType::TextFrame) => {
-                document
-                    .text_frames
-                    .push(codec::text_frame_from_params(&params));
+                let v = codec::text_frame_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].text_frames.push(v),
+                    None => document.text_frames.push(v),
+                }
             }
             Some(SchRecordType::Junction) => {
-                document
-                    .junctions
-                    .push(codec::junction_from_params(&params));
+                let v = codec::junction_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].junctions.push(v),
+                    None => document.junctions.push(v),
+                }
             }
             Some(SchRecordType::Image) => {
-                document.images.push(codec::image_from_params(&params));
+                let v = codec::image_from_params(&params);
+                match owner_component {
+                    Some(ci) => document.components[ci].images.push(v),
+                    None => document.images.push(v),
+                }
             }
             Some(SchRecordType::BusEntry) => {
                 document
@@ -912,7 +985,11 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
             }
             Some(SchRecordType::Designator) | Some(SchRecordType::Parameter) => {
                 let p = codec::parameter_from_params(&params);
-                if let Some(idx) = current_component {
+                // A component's parameters always name it by `OWNERINDEX`;
+                // one with no owner, or with an owner that is not a
+                // component (a pin, a sheet symbol, a parameter set), stays
+                // at document level.
+                if let Some(idx) = owner_component {
                     document.components[idx].parameters.push(p);
                 } else {
                     document.parameters.push(p);
@@ -927,6 +1004,9 @@ fn read_record_stream(document: &mut Document, data: &[u8], additional: bool) ->
                 document.blankets.push(codec::blanket_from_params(&params));
             }
             Some(SchRecordType::Implementation) => {
+                if let Some(ci) = owner_component {
+                    current_component = Some(ci);
+                }
                 if let Some(idx) = current_component {
                     let mut impl_ = codec::implementation_from_params(&params);
                     impl_.common.owner_index =

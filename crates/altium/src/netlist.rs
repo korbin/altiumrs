@@ -136,6 +136,10 @@ pub const PORT_DESIGNATOR: &str = "PORT";
 
 /// Snap radius for port ends: one DXP unit (10 mil).
 const PORT_SNAP_RAW: i64 = crate::sch::binary::RAW_PER_DXP as i64;
+/// Tolerance for a node landing on a wire: one mil (10 000 raw units).
+/// Absorbs `_FRAC` rounding between pin ends and wire vertices without
+/// reaching the next grid position (Altium's finest snap grid is 1 DXP).
+const NODE_SNAP_RAW: i64 = 10_000;
 
 impl Netlist {
     /// Build a netlist from a `.PcbDoc`. Walks every component's pads and
@@ -400,11 +404,18 @@ impl Netlist {
         // any point on a wire as connected. Matching only exact vertices
         // splits nets: the classic symptom is a labelled net losing every
         // member on the far side of a junction.
+        //
+        // The test is tolerant to one mil: pin ends and wire vertices carry
+        // separate `_FRAC` fields, so a wire dropped exactly on a pin can
+        // still miss it by a few raw units (observed: a pin end 40 raw
+        // units from the vertex of the wire feeding it). Altium connects
+        // those; one mil is far below any placement grid and far above
+        // any rounding.
         for verts in &segments {
             for seg in verts.windows(2) {
                 let (a, b) = (seg[0], seg[1]);
                 for p in &nodes {
-                    if point_on_segment_interior(*p, a, b) {
+                    if point_near_segment(*p, a, b, NODE_SNAP_RAW) {
                         uf.union(*p, a);
                     }
                 }
@@ -550,7 +561,7 @@ impl Netlist {
                 for seg in verts.windows(2) {
                     let (a, b) = (seg[0], seg[1]);
                     for p in &hnodes {
-                        if point_on_segment_interior(*p, a, b) {
+                        if point_near_segment(*p, a, b, NODE_SNAP_RAW) {
                             huf.union(*p, a);
                         }
                     }
@@ -966,21 +977,28 @@ pub(crate) fn pcb_designator(comp: &pcb::Component) -> String {
         .unwrap_or_else(|| comp.name.clone())
 }
 
-/// True when `p` lies strictly inside segment `a`..`b` (collinear, within
-/// the bounding box, not an endpoint). Exact integer arithmetic on raw
-/// coordinate units — works for orthogonal and angled wires alike.
-fn point_on_segment_interior(p: CoordPoint, a: CoordPoint, b: CoordPoint) -> bool {
+/// True when `p` is within `tol` raw units of segment `a`..`b` (measured
+/// perpendicular to the segment, and along it past either end) and is not
+/// exactly one of its endpoints. `tol == 0` is the exact collinear-interior
+/// test. Squared terms are computed in `i128`: raw coordinates reach ~1e8,
+/// so the cross product reaches ~1e16 and its square overflows `i64`.
+fn point_near_segment(p: CoordPoint, a: CoordPoint, b: CoordPoint, tol: i64) -> bool {
     if p == a || p == b {
         return false;
     }
     let (px, py) = (i64::from(p.x.to_raw()), i64::from(p.y.to_raw()));
     let (ax, ay) = (i64::from(a.x.to_raw()), i64::from(a.y.to_raw()));
     let (bx, by) = (i64::from(b.x.to_raw()), i64::from(b.y.to_raw()));
-    let cross = (bx - ax) * (py - ay) - (by - ay) * (px - ax);
-    if cross != 0 {
+    if px < ax.min(bx) - tol || px > ax.max(bx) + tol || py < ay.min(by) - tol || py > ay.max(by) + tol {
         return false;
     }
-    px >= ax.min(bx) && px <= ax.max(bx) && py >= ay.min(by) && py <= ay.max(by)
+    let (dx, dy) = (bx - ax, by - ay);
+    if dx == 0 && dy == 0 {
+        return false;
+    }
+    let cross = i128::from(dx * (py - ay) - dy * (px - ax));
+    let len2 = i128::from(dx) * i128::from(dx) + i128::from(dy) * i128::from(dy);
+    cross * cross <= i128::from(tol) * i128::from(tol) * len2
 }
 
 fn sch_designator(comp: &sch::Component) -> String {
@@ -1575,6 +1593,57 @@ mod tests {
             .collect();
         assert!(designators.contains(&"R1"));
         assert!(designators.contains(&"R2"));
+    }
+
+    #[test]
+    fn schdoc_netlist_joins_pin_end_that_misses_wire_by_a_fraction_of_a_mil() {
+        // Observed in a production sheet: a ferrite's pin ended at
+        // y = 91_338_568 raw while the wire feeding it ended at
+        // y = 91_338_608 — a 40-raw-unit (0.004 mil) miss from the
+        // separate `_FRAC` fields. Altium connects them; so must we.
+        let mut doc = sch::Document::default();
+        doc.components.push(placed(
+            "R1",
+            "R0402",
+            vec![pin_at("1", coord_pt(0.0, 0.0), PinOrientation::Right, 10.0)],
+        ));
+        doc.components.push(placed(
+            "R2",
+            "R0402",
+            vec![pin_at("1", coord_pt(50.0, 0.0), PinOrientation::Left, 10.0)],
+        ));
+        // A third pin whose end sits 40 raw units off the INTERIOR of the
+        // wire (not at a vertex) must join too.
+        doc.components.push(placed(
+            "R3",
+            "R0402",
+            vec![pin_at(
+                "1",
+                CoordPoint::new(Coord::from_mils(25.0), Coord::from_raw(-40 + Coord::from_mils(10.0).to_raw())),
+                PinOrientation::Down,
+                10.0,
+            )],
+        ));
+        // A fourth pin ending 20 mil short of the wire must NOT join: that
+        // is a real dangling pin, not rounding.
+        doc.components.push(placed(
+            "R4",
+            "R0402",
+            vec![pin_at("1", coord_pt(30.0, 30.0), PinOrientation::Down, 10.0)],
+        ));
+        let mut w = Wire::default();
+        w.vertices = vec![coord_pt(10.0, 0.0), CoordPoint::new(Coord::from_mils(40.0), Coord::from_raw(40))];
+        doc.wires.push(w);
+
+        let nl = Netlist::from_sch_document(&doc);
+        let joined = nl
+            .nets
+            .iter()
+            .find(|n| n.connections.iter().any(|c| c.designator == "R1"))
+            .expect("R1 must be on a net");
+        let mut ds: Vec<&str> = joined.connections.iter().map(|c| c.designator.as_str()).collect();
+        ds.sort_unstable();
+        assert_eq!(ds, vec!["R1", "R2", "R3"], "fraction-of-a-mil misses join, 20 mil misses do not");
     }
 
     #[test]

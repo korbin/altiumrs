@@ -33,6 +33,13 @@ macro_rules! sch_record {
             pub dimmed: bool,
             #[altium(name = "UNIQUEID")]
             pub unique_id: Option<String>,
+            /// Reserved key: original record index + 1 (0 = unknown). The
+            /// writer strips every `__`-prefixed key before serialising.
+            #[altium(name = "__SOURCEINDEX")]
+            pub source_index_raw: i32,
+            /// Keys this record type does not model, kept verbatim.
+            #[altium(extra)]
+            pub extra: Vec<(String, String, bool)>,
             $($body)*
         }
 
@@ -48,6 +55,8 @@ macro_rules! sch_record {
                 self.disabled = common.disabled;
                 self.dimmed = common.dimmed;
                 self.unique_id = common.unique_id.clone();
+                self.source_index_raw = common.source_index.map_or(0, |i| i + 1);
+                self.extra = common.extra.clone();
             }
 
             /// Build a `PrimitiveCommon` from this DTO's nine shared fields.
@@ -62,6 +71,8 @@ macro_rules! sch_record {
                     disabled: self.disabled,
                     dimmed: self.dimmed,
                     unique_id: self.unique_id.clone(),
+                    source_index: (self.source_index_raw > 0).then(|| self.source_index_raw - 1),
+                    extra: self.extra.clone(),
                 }
             }
         }
@@ -152,29 +163,26 @@ sch_record! {
         #[altium(name = "SYMBOL_INSIDE")] pub symbol_inside: i32,
         #[altium(name = "SYMBOL_OUTSIDE")] pub symbol_outside: i32,
         #[altium(name = "SYMBOL_LINEWIDTH")] pub symbol_line_width: i32,
-        #[altium(name = "SWAPIDPART")] pub swap_id_part: i32,
+        #[altium(name = "SWAPIDPART")] pub swap_id_part: Option<String>,
         #[altium(name = "PINPROPAGATIONDELAY")] pub pin_propagation_delay: f64,
-        #[altium(name = "DESIGNATOR.CUSTOMFONTID")] pub designator_custom_font_id: i32,
-        #[altium(name = "NAME.CUSTOMFONTID")] pub name_custom_font_id: i32,
+        #[altium(name = "DESIGNATOR_CUSTOMFONTID")] pub designator_custom_font_id: i32,
+        #[altium(name = "NAME_CUSTOMFONTID")] pub name_custom_font_id: i32,
         #[altium(name = "WIDTH")] pub width: i32,
         #[altium(name = "AREACOLOR")] pub area_color: i32,
         #[altium(name = "DEFAULTVALUE")] pub default_value: Option<String>,
         #[altium(name = "ISHIDDEN")] pub is_hidden: bool,
-        #[altium(name = "DESIGNATOR.CUSTOMCOLOR")] pub designator_custom_color: i32,
-        #[altium(name = "DESIGNATOR.CUSTOMPOSITION.MARGIN")] pub designator_custom_position_margin: i32,
-        #[altium(name = "DESIGNATOR.CUSTOMPOSITION.ROTATIONANCHOR")] pub designator_custom_position_rotation_anchor: i32,
-        #[altium(name = "DESIGNATOR.CUSTOMPOSITION.ROTATIONRELATIVE")] pub designator_custom_position_rotation_relative: bool,
-        #[altium(name = "DESIGNATOR.FONTMODE")] pub designator_font_mode: i32,
-        #[altium(name = "DESIGNATOR.POSITIONMODE")] pub designator_position_mode: i32,
-        #[altium(name = "NAME.CUSTOMCOLOR")] pub name_custom_color: i32,
-        #[altium(name = "NAME.CUSTOMPOSITION.MARGIN")] pub name_custom_position_margin: i32,
-        #[altium(name = "NAME.CUSTOMPOSITION.ROTATIONANCHOR")] pub name_custom_position_rotation_anchor: i32,
-        #[altium(name = "NAME.CUSTOMPOSITION.ROTATIONRELATIVE")] pub name_custom_position_rotation_relative: bool,
-        #[altium(name = "NAME.FONTMODE")] pub name_font_mode: i32,
-        #[altium(name = "NAME.POSITIONMODE")] pub name_position_mode: i32,
+        #[altium(name = "DESIGNATOR_CUSTOMCOLOR")] pub designator_custom_color: i32,
+        #[altium(name = "DESIGNATOR_CUSTOMPOSITION_MARGIN")] pub designator_custom_position_margin: i32,
+        /// Flag byte shared with the library sidecar stream: 0x01 custom
+        /// position, 0x02 rotation anchor, 0x04 rotation relative, 0x10
+        /// custom font. Text pin records carry it inline.
+        #[altium(name = "PINDESIGNATOR_POSITIONCONGLOMERATE")] pub designator_position_conglomerate: i32,
+        #[altium(name = "NAME_CUSTOMCOLOR")] pub name_custom_color: i32,
+        #[altium(name = "NAME_CUSTOMPOSITION_MARGIN")] pub name_custom_position_margin: i32,
+        #[altium(name = "PINNAME_POSITIONCONGLOMERATE")] pub name_position_conglomerate: i32,
         #[altium(name = "SWAPID_PAIR")] pub swap_id_pair: Option<String>,
         #[altium(name = "SWAPID_PARTPIN")] pub swap_id_part_pin: Option<String>,
-        #[altium(name = "SWAPID_PIN")] pub swap_id_pin: Option<String>,
+        #[altium(name = "SWAPIDPIN")] pub swap_id_pin: Option<String>,
         #[altium(name = "HIDDENNETNAME")] pub hidden_net_name: Option<String>,
         #[altium(name = "PINPACKAGELENGTH")] pub pin_package_length: i32,
     }
@@ -457,7 +465,7 @@ sch_record! {
         #[altium(name = "AREACOLOR")] pub area_color: i32,
         #[altium(name = "ISSOLID")] pub is_solid: bool,
         #[altium(name = "SHOWHIDDENFIELDS")] pub show_hidden_fields: bool,
-        #[altium(name = "SYMBOLTYPE")] pub symbol_type: i32,
+        #[altium(name = "SYMBOLTYPE")] pub symbol_type: Option<String>,
         #[altium(name = "DESIGNITEMID")] pub design_item_id: Option<String>,
         #[altium(name = "ITEMGUID")] pub item_guid: Option<String>,
         #[altium(name = "LIBIDENTIFIERKIND")] pub lib_identifier_kind: i32,
@@ -476,13 +484,13 @@ sch_record! {
         #[altium(name = "NAME")] pub name: Option<String>,
         #[altium(name = "IOTYPE")] pub io_type: i32,
         #[altium(name = "STYLE")] pub style: i32,
-        #[altium(name = "ARROWKIND")] pub arrow_kind: i32,
+        #[altium(name = "ARROWKIND")] pub arrow_kind: Option<String>,
         #[altium(name = "HARNESSTYPE")] pub harness_type: Option<String>,
         #[altium(name = "FONTID")] pub font_id: i32,
         #[altium(name = "COLOR")] pub color: i32,
         #[altium(name = "AREACOLOR")] pub area_color: i32,
         #[altium(name = "TEXTCOLOR")] pub text_color: i32,
-        #[altium(name = "TEXTSTYLE")] pub text_style: i32,
+        #[altium(name = "TEXTSTYLE")] pub text_style: Option<String>,
         #[altium(name = "HARNESSCOLOR")] pub harness_color: i32,
     }
 }
@@ -546,7 +554,7 @@ sch_record! {
         #[altium(name = "ORIENTATION")] pub orientation: i32,
         #[altium(name = "COLOR")] pub color: i32,
         #[altium(name = "ISACTIVE")] pub is_active: bool,
-        #[altium(name = "SYMBOL")] pub symbol: i32,
+        #[altium(name = "SYMBOL")] pub symbol: Option<String>,
         #[altium(name = "AREACOLOR")] pub area_color: i32,
         #[altium(name = "SUPPRESSALL")] pub suppress_all: bool,
         #[altium(name = "ERRORKINDSET_TOSUPPRESS")] pub error_kind_set_to_suppress: Option<String>,

@@ -12,11 +12,18 @@ use crate::error::Result;
 /// placeholder header that gets back-patched once the body has been written.
 pub struct BinaryWriter<W> {
     inner: W,
+    blocks: u32,
 }
 
 impl<W: Write + Seek> BinaryWriter<W> {
     pub fn new(inner: W) -> Self {
-        Self { inner }
+        Self { inner, blocks: 0 }
+    }
+
+    /// Number of size-prefixed blocks written so far. Record streams use
+    /// the block position as the record index that `OWNERINDEX` refers to.
+    pub fn blocks_written(&self) -> u32 {
+        self.blocks
     }
 
     pub fn into_inner(self) -> W {
@@ -122,6 +129,7 @@ impl<W: Write + Seek> BinaryWriter<W> {
         self.inner.seek(SeekFrom::Start(header_pos))?;
         self.write_u32(header)?;
         self.inner.seek(SeekFrom::Start(end_pos))?;
+        self.blocks += 1;
         Ok(())
     }
 

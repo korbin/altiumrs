@@ -14,6 +14,17 @@ use crate::enums::{PinElectricalType, PinOrientation, PowerPortStyle, TextJustif
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PrimitiveCommon {
     pub owner_index: i32,
+    /// Position of this record in the stream it was read from, in
+    /// `OWNERINDEX` numbering (the header record is not counted). `None`
+    /// for primitives built in memory. Lets the writer re-target owner
+    /// references after it re-orders records.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub source_index: Option<i32>,
+    /// `(name, value, is_utf8)` entries of the source record that the
+    /// typed model has no field for. Written back verbatim so nothing the
+    /// vendor stores is lost through a round trip.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extra: Vec<(String, String, bool)>,
     pub is_not_accessible: bool,
     pub index_in_sheet: i32,
     pub owner_part_id: i32,
@@ -396,6 +407,7 @@ sch_struct! {
         pub show_name: bool,
         pub is_mirrored: bool,
         pub is_read_only: bool,
+        pub read_only_state: i32,
         pub description: Option<String>,
         pub area_color: i32,
         pub auto_position: i32,
@@ -510,7 +522,7 @@ sch_struct! {
         pub orientation: i32,
         pub color: i32,
         pub is_active: bool,
-        pub symbol: i32,
+        pub symbol: Option<String>,
         pub area_color: i32,
         pub suppress_all: bool,
         pub error_kind_set_to_suppress: Option<String>,
@@ -557,7 +569,7 @@ sch_struct! {
         pub area_color: i32,
         pub is_solid: bool,
         pub show_hidden_fields: bool,
-        pub symbol_type: i32,
+        pub symbol_type: Option<String>,
         pub design_item_id: Option<String>,
         pub item_guid: Option<String>,
         pub lib_identifier_kind: i32,
@@ -576,14 +588,14 @@ sch_struct! {
         pub name: String,
         pub io_type: i32,
         pub style: i32,
-        pub arrow_kind: i32,
+        pub arrow_kind: Option<String>,
         pub harness_type: Option<String>,
         pub harness_color: i32,
         pub font_id: i32,
         pub color: i32,
         pub area_color: i32,
         pub text_color: i32,
-        pub text_style: i32,
+        pub text_style: Option<String>,
     }
 }
 

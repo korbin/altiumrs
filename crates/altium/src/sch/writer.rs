@@ -13,6 +13,7 @@ use super::binary::{
 use super::codec;
 use super::component::{Component, RawRecord};
 use super::document::Document;
+use super::primitives::PrimitiveCommon;
 use super::library::Library;
 use super::primitives::Pin;
 use crate::binary::BinaryWriter;
@@ -215,7 +216,7 @@ fn write_component(cf: &mut CompoundFile, component: &Component, section_key: &s
     let mut buf = Cursor::new(Vec::<u8>::new());
     let mut bw = BinaryWriter::new(&mut buf);
 
-    write_component_records(&mut bw, component)?;
+    write_component_records(&mut bw, component, PinRecordForm::Binary, None)?;
 
     cf.write_stream(format!("{section_key}/Data"), &buf.into_inner())?;
 
@@ -236,14 +237,130 @@ fn write_component(cf: &mut CompoundFile, component: &Component, section_key: &s
     Ok(())
 }
 
+/// How pin records are emitted. Library component streams use the binary
+/// form (text customisation goes to the sidecar streams); documents use the
+/// text form with the customisation inline, which is the only form the
+/// canvas renders in a document.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PinRecordForm {
+    Binary,
+    Text,
+}
+
+/// Stamp the owning record's index on a child. `None` is the library case,
+/// where the component header is record 0 and Altium omits the key.
+fn stamp_owner(p: &mut ParameterMap, owner: Option<i32>) {
+    if let Some(o) = owner {
+        p.insert("OWNERINDEX", o.to_string());
+        p.insert("__OWNERRESOLVED", "1");
+    }
+}
+
+/// True when a top-level primitive was read as the child of some other
+/// record: it is emitted after its owner and its `OWNERINDEX` is
+/// re-targeted by [`resolve_owner_indices`].
+fn is_owned(c: &PrimitiveCommon) -> bool {
+    c.source_index.is_some() && c.owner_index != 0
+}
+
+/// Second pass over a written record stream. Builds the old-to-new record
+/// index map from the reserved `__SOURCEINDEX` keys, rewrites every
+/// `OWNERINDEX` that was not stamped structurally, and strips all reserved
+/// (`__`-prefixed) keys so nothing synthetic reaches the file.
+fn resolve_owner_indices(stream: &[u8]) -> Vec<u8> {
+    struct Block {
+        flags: u8,
+        body: Vec<u8>,
+    }
+    let mut blocks = Vec::new();
+    let mut i = 0usize;
+    while i + 4 <= stream.len() {
+        let header = u32::from_le_bytes([stream[i], stream[i + 1], stream[i + 2], stream[i + 3]]);
+        let len = (header & 0x00ff_ffff) as usize;
+        let flags = (header >> 24) as u8;
+        blocks.push(Block {
+            flags,
+            body: stream[i + 4..(i + 4 + len).min(stream.len())].to_vec(),
+        });
+        i += 4 + len;
+    }
+    fn fields(body: &[u8]) -> Vec<Vec<u8>> {
+        let trimmed = body.strip_suffix(b"\0").unwrap_or(body);
+        trimmed.split(|b| *b == b'|').skip(1).map(<[u8]>::to_vec).collect()
+    }
+    fn key_of(field: &[u8]) -> Vec<u8> {
+        field.split(|b| *b == b'=').next().unwrap_or(field).to_ascii_uppercase()
+    }
+    fn value_of(field: &[u8]) -> &[u8] {
+        field.splitn(2, |b| *b == b'=').nth(1).unwrap_or(b"")
+    }
+    let header_offset = usize::from(
+        blocks
+            .first()
+            .is_some_and(|b| b.flags == 0 && !fields(&b.body).iter().any(|f| key_of(f) == b"RECORD")),
+    );
+    let mut new_index_of: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    for (n, b) in blocks.iter().enumerate() {
+        if b.flags != 0 {
+            continue;
+        }
+        for f in fields(&b.body) {
+            if key_of(&f) == b"__SOURCEINDEX" {
+                if let Ok(v) = std::str::from_utf8(value_of(&f)).unwrap_or("").parse::<i64>() {
+                    if v > 0 {
+                        new_index_of.insert(v - 1, n as i64 - header_offset as i64);
+                    }
+                }
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(stream.len());
+    for b in &blocks {
+        let body: Vec<u8> = if b.flags == 0 {
+            let fs = fields(&b.body);
+            let from_stream = fs.iter().any(|f| key_of(f) == b"__SOURCEINDEX");
+            let resolved = fs.iter().any(|f| key_of(f) == b"__OWNERRESOLVED");
+            let mut rebuilt = Vec::with_capacity(b.body.len());
+            for f in &fs {
+                let k = key_of(f);
+                if k.starts_with(b"__") {
+                    continue;
+                }
+                rebuilt.push(b'|');
+                if k == b"OWNERINDEX" && from_stream && !resolved {
+                    let old = std::str::from_utf8(value_of(f)).unwrap_or("").parse::<i64>().ok();
+                    if let Some(new) = old.and_then(|o| new_index_of.get(&o)) {
+                        rebuilt.extend_from_slice(format!("OWNERINDEX={new}").as_bytes());
+                        continue;
+                    }
+                }
+                rebuilt.extend_from_slice(f);
+            }
+            rebuilt.push(0);
+            rebuilt
+        } else {
+            b.body.clone()
+        };
+        let header = (u32::from(b.flags) << 24) | (body.len() as u32 & 0x00ff_ffff);
+        out.extend_from_slice(&header.to_le_bytes());
+        out.extend_from_slice(&body);
+    }
+    out
+}
+
+/// `owner` is the component header's absolute record index when writing
+/// into a document stream; children and the implementation chain are
+/// numbered from it so every `OWNERINDEX` resolves after re-ordering.
 fn write_component_records<W: Write + Seek>(
     bw: &mut BinaryWriter<W>,
     component: &Component,
+    pin_form: PinRecordForm,
+    owner: Option<i32>,
 ) -> Result<()> {
-    // Altium links implementation records (44..48) by record index inside
-    // the component's Data stream. The component header (RECORD=1) is emitted
-    // by the caller and sits at index 0, so counting starts at 1.
-    let mut rec_idx: i32 = 1;
+    // Altium links implementation records (44..48) by record index. In a
+    // library stream the component header sits at index 0, so counting
+    // starts at 1; in a document it starts after the header's own index.
+    let mut rec_idx: i32 = owner.map_or(1, |o| o + 1);
     // RECORD=1 (Component) goes first.
     let mut params = ParameterMap::new();
     params.insert("RECORD", "1");
@@ -255,6 +372,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "14");
         codec::rectangle_to_params(rect, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -262,6 +380,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "5");
         codec::bezier_to_params(bz, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -269,6 +388,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "6");
         codec::polyline_to_params(poly, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -276,6 +396,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "7");
         codec::polygon_to_params(poly, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -283,6 +404,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "8");
         codec::ellipse_to_params(e, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -290,6 +412,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "9");
         codec::pie_to_params(pie, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -297,6 +420,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "10");
         codec::rounded_rectangle_to_params(r, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -304,6 +428,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "11");
         codec::elliptical_arc_to_params(ea, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -311,6 +436,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "12");
         codec::arc_to_params(arc, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -318,27 +444,39 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "13");
         codec::line_to_params(line, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
 
-    // Pins go out as binary records (flag 0x01); per-pin font/color overrides
-    // are carried in the sibling PinTextData stream.
     for pin in &component.pins {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "2");
         codec::pin_to_params(pin, &mut p);
-        let body = super::binary::encode_binary_pin(&p);
-        bw.write_block_with_flags(0x01, |w| {
-            w.write_bytes(&body)?;
-            Ok(())
-        })?;
+        stamp_owner(&mut p, owner);
+        match pin_form {
+            PinRecordForm::Text => {
+                // Only the binary form carries these; their values are not
+                // representable as text fields.
+                p.remove("SWAPIDGROUP");
+                p.remove("PARTANDSEQUENCE");
+                emit_param_record(bw, &p)?;
+            }
+            PinRecordForm::Binary => {
+                let body = super::binary::encode_binary_pin(&p);
+                bw.write_block_with_flags(0x01, |w| {
+                    w.write_bytes(&body)?;
+                    Ok(())
+                })?;
+            }
+        }
         rec_idx += 1;
     }
     for sym in &component.symbols {
         let mut p = ParameterMap::new();
         p.insert("RECORD", "3");
         codec::symbol_to_params(sym, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -346,6 +484,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "4");
         codec::label_to_params(label, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -353,6 +492,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "17");
         codec::power_object_to_params(po, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -360,6 +500,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "25");
         codec::net_label_to_params(nl, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -367,6 +508,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "27");
         codec::wire_to_params(w, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -374,6 +516,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "28");
         codec::text_frame_to_params(tf, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -381,6 +524,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "29");
         codec::junction_to_params(j, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -388,6 +532,7 @@ fn write_component_records<W: Write + Seek>(
         let mut p = ParameterMap::new();
         p.insert("RECORD", "30");
         codec::image_to_params(img, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -404,6 +549,7 @@ fn write_component_records<W: Write + Seek>(
         };
         p.insert("RECORD", record_id);
         codec::parameter_to_params(param, &mut p);
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
     }
@@ -418,6 +564,7 @@ fn write_component_records<W: Write + Seek>(
         let list_idx = rec_idx;
         let mut p = ParameterMap::new();
         p.insert("RECORD", "44");
+        stamp_owner(&mut p, owner);
         emit_param_record(bw, &p)?;
         rec_idx += 1;
         for impl_ in &component.implementations {
@@ -656,6 +803,8 @@ impl Document {
             }
             emit_param_record(&mut bw, &p)?;
         }
+        // The header record is not counted in `OWNERINDEX` numbering.
+        let hdr = i32::from(self.header_parameters.is_some());
         if let Some(sheet) = &self.sheet_settings {
             let mut p = ParameterMap::new();
             p.insert("RECORD", "31");
@@ -672,117 +821,223 @@ impl Document {
             }
             emit_param_record(&mut bw, &p)?;
         }
-        for ann in &self.sheet_name_annotations {
-            let mut p = ParameterMap::new();
-            p.insert("RECORD", "32");
-            for (k, v) in ann {
-                p.insert(k, v.clone());
-            }
-            emit_param_record(&mut bw, &p)?;
-        }
-        for ann in &self.sheet_filename_annotations {
-            let mut p = ParameterMap::new();
-            p.insert("RECORD", "33");
-            for (k, v) in ann {
-                p.insert(k, v.clone());
-            }
-            emit_param_record(&mut bw, &p)?;
-        }
-
-        // Top-level primitives that don't belong to a component.
+        // Top-level records. Free ones go out before the components; ones
+        // read as children of another record (a sheet symbol's annotations,
+        // a pin's parameters, a template's graphics) go out after their
+        // owner, and `resolve_owner_indices` re-targets their `OWNERINDEX`.
+        macro_rules! top_level {
+            ($phase:expr) => {{
+                let owned_phase: bool = $phase;
+                let map_is_owned = |m: &BTreeMap<String, String>| {
+                    m.keys().any(|k| k.eq_ignore_ascii_case("OWNERINDEX"))
+                        && m.keys().any(|k| k.eq_ignore_ascii_case("__SOURCEINDEX"))
+                };
+                for ann in &self.sheet_name_annotations {
+                    if map_is_owned(ann) != owned_phase {
+                        continue;
+                    }
+                    let mut p = ParameterMap::new();
+                    p.insert("RECORD", "32");
+                    for (k, v) in ann {
+                        p.insert(k, v.clone());
+                    }
+                    emit_param_record(&mut bw, &p)?;
+                }
+                for ann in &self.sheet_filename_annotations {
+                    if map_is_owned(ann) != owned_phase {
+                        continue;
+                    }
+                    let mut p = ParameterMap::new();
+                    p.insert("RECORD", "33");
+                    for (k, v) in ann {
+                        p.insert(k, v.clone());
+                    }
+                    emit_param_record(&mut bw, &p)?;
+                }
         for label in &self.labels {
+            if is_owned(&label.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "4", |p| codec::label_to_params(label, p))?;
         }
         for sym in &self.symbols {
+            if is_owned(&sym.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "3", |p| codec::symbol_to_params(sym, p))?;
         }
         for bz in &self.beziers {
+            if is_owned(&bz.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "5", |p| codec::bezier_to_params(bz, p))?;
         }
         for poly in &self.polylines {
+            if is_owned(&poly.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "6", |p| codec::polyline_to_params(poly, p))?;
         }
         for poly in &self.polygons {
+            if is_owned(&poly.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "7", |p| codec::polygon_to_params(poly, p))?;
         }
         for e in &self.ellipses {
+            if is_owned(&e.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "8", |p| codec::ellipse_to_params(e, p))?;
         }
         for pie in &self.pies {
+            if is_owned(&pie.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "9", |p| codec::pie_to_params(pie, p))?;
         }
         for r in &self.rounded_rectangles {
+            if is_owned(&r.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "10", |p| codec::rounded_rectangle_to_params(r, p))?;
         }
         for ea in &self.elliptical_arcs {
+            if is_owned(&ea.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "11", |p| codec::elliptical_arc_to_params(ea, p))?;
         }
         for arc in &self.arcs {
+            if is_owned(&arc.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "12", |p| codec::arc_to_params(arc, p))?;
         }
         for line in &self.lines {
+            if is_owned(&line.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "13", |p| codec::line_to_params(line, p))?;
         }
         for rect in &self.rectangles {
+            if is_owned(&rect.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "14", |p| codec::rectangle_to_params(rect, p))?;
         }
         for sym in &self.sheet_symbols {
+            if is_owned(&sym.common) != owned_phase {
+                continue;
+            }
+            let sym_idx = bw.blocks_written() as i32 - hdr;
             emit_typed(&mut bw, "15", |p| codec::sheet_symbol_to_params(sym, p))?;
             for entry in &sym.entries {
-                emit_typed(&mut bw, "16", |p| codec::sheet_entry_to_params(entry, p))?;
+                emit_typed(&mut bw, "16", |p| {
+                    codec::sheet_entry_to_params(entry, p);
+                    stamp_owner(p, Some(sym_idx));
+                })?;
             }
         }
         for po in &self.power_objects {
+            if is_owned(&po.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "17", |p| codec::power_object_to_params(po, p))?;
         }
         for port in &self.ports {
+            if is_owned(&port.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "18", |p| codec::port_to_params(port, p))?;
         }
         for n in &self.no_ercs {
+            if is_owned(&n.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "22", |p| codec::no_erc_to_params(n, p))?;
         }
         for nl in &self.net_labels {
+            if is_owned(&nl.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "25", |p| codec::net_label_to_params(nl, p))?;
         }
         for bus in &self.buses {
+            if is_owned(&bus.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "26", |p| codec::bus_to_params(bus, p))?;
         }
         for w in &self.wires {
+            if is_owned(&w.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "27", |p| codec::wire_to_params(w, p))?;
         }
         for tf in &self.text_frames {
+            if is_owned(&tf.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "28", |p| codec::text_frame_to_params(tf, p))?;
         }
         for j in &self.junctions {
+            if is_owned(&j.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "29", |p| codec::junction_to_params(j, p))?;
         }
         for img in &self.images {
+            if is_owned(&img.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "30", |p| codec::image_to_params(img, p))?;
         }
         for be in &self.bus_entries {
+            if is_owned(&be.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "37", |p| codec::bus_entry_to_params(be, p))?;
         }
         for param in &self.parameters {
+            if is_owned(&param.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "41", |p| codec::parameter_to_params(param, p))?;
         }
         for ps in &self.parameter_sets {
+            if is_owned(&ps.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "43", |p| codec::parameter_set_to_params(ps, p))?;
         }
         for b in &self.blankets {
+            if is_owned(&b.common) != owned_phase {
+                continue;
+            }
             emit_typed(&mut bw, "225", |p| codec::blanket_to_params(b, p))?;
         }
 
-        // Components and their owned children.
-        for component in &self.components {
-            write_component_records(&mut bw, component)?;
+            }};
         }
+        top_level!(false);
+
+        // Components and their owned children. Each child names its owner
+        // by the owner's absolute record index, counted after the header.
+        for component in &self.components {
+            let base = bw.blocks_written() as i32 - hdr;
+            write_component_records(&mut bw, component, PinRecordForm::Text, Some(base))?;
+        }
+
+        top_level!(true);
 
         // Replay any unhandled raw records last.
         for record in &self.raw_records {
             emit_raw_record(&mut bw, record)?;
         }
 
-        cf.write_stream("FileHeader", &buf.into_inner())?;
+        let resolved = resolve_owner_indices(&buf.into_inner());
+        cf.write_stream("FileHeader", &resolved)?;
 
         // Harness connectors (215) with their entries (216) / type label
         // (217) and signal harnesses (218) live in the separate `Additional`
@@ -815,16 +1070,23 @@ impl Document {
                 header.insert("Weight", count.to_string());
                 emit_param_record(&mut abw, &header)?;
                 for hc in &self.harness_connectors {
+                    // Entries and the type label name the connector by its
+                    // index within this stream, after the header record.
+                    let hc_idx = abw.blocks_written() as i32 - 1;
                     emit_typed(&mut abw, "215", |p| {
                         codec::harness_connector_to_params(hc, p)
                     })?;
                     for entry in &hc.entries {
                         emit_typed(&mut abw, "216", |p| {
-                            codec::harness_entry_to_params(entry, p)
+                            codec::harness_entry_to_params(entry, p);
+                            stamp_owner(p, Some(hc_idx));
                         })?;
                     }
                     if let Some(ht) = &hc.harness_type {
-                        emit_typed(&mut abw, "217", |p| codec::harness_type_to_params(ht, p))?;
+                        emit_typed(&mut abw, "217", |p| {
+                            codec::harness_type_to_params(ht, p);
+                            stamp_owner(p, Some(hc_idx));
+                        })?;
                     }
                 }
                 for sh in &self.signal_harnesses {

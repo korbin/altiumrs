@@ -30,6 +30,10 @@ pub struct RawRecord {
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct Component {
+    /// Keys of the component record the typed fields do not cover, kept
+    /// verbatim for round trips.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub extra: Vec<(String, String, bool)>,
     pub name: String,
     pub description: Option<String>,
     pub comment: Option<String>,
@@ -134,6 +138,7 @@ impl Default for Component {
         // these, the editor renders the symbol body in black and shows the
         // "Library Path: <unset>" warning even on round-trip.
         Self {
+            extra: Vec::new(),
             name: String::new(),
             description: None,
             comment: None,

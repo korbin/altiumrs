@@ -31,6 +31,10 @@ pub struct FieldInput {
     pub ty: Type,
     pub param_name: String,
     pub skip: bool,
+    /// `#[altium(extra)]`: a `Vec<(String, String, bool)>` that receives
+    /// every `(name, value, is_utf8)` entry no other field claims, and
+    /// writes them back verbatim. Keeps keys the model does not know.
+    pub extra: bool,
     pub kind: FieldKind,
 }
 
@@ -123,6 +127,7 @@ fn parse_field(field: Field) -> Result<FieldInput> {
 
     let mut param_name: Option<String> = None;
     let mut skip = false;
+    let mut extra = false;
 
     for attr in &field.attrs {
         if !attr.path().is_ident("altium") {
@@ -135,6 +140,9 @@ fn parse_field(field: Field) -> Result<FieldInput> {
                 Ok(())
             } else if meta.path.is_ident("skip") {
                 skip = true;
+                Ok(())
+            } else if meta.path.is_ident("extra") {
+                extra = true;
                 Ok(())
             } else if meta.path.is_ident("min_version") || meta.path.is_ident("max_version") {
                 // Recognised but currently unused; consume the value so syntax
@@ -155,6 +163,7 @@ fn parse_field(field: Field) -> Result<FieldInput> {
         ty,
         param_name,
         skip,
+        extra,
         kind,
     })
 }
