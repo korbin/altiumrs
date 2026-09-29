@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use super::context::{RenderContext, RenderOptions, TextAnchorH, TextAnchorV, TextStyle};
+use super::context::{RenderContext, RenderOptions, TextAnchorH, TextAnchorV, TextStyle, ccw_sweep};
 use crate::color::Color;
 
 /// Accumulates SVG drawing commands as a string.
@@ -160,9 +160,11 @@ impl RenderContext for SvgContext {
         let y1 = cy - radius * start_rad.sin();
         let x2 = cx + radius * end_rad.cos();
         let y2 = cy - radius * end_rad.sin();
-        let sweep = end_angle - start_angle;
-        let large_arc = if sweep.abs() > 180.0 { 1 } else { 0 };
-        let sweep_flag = if sweep >= 0.0 { 0 } else { 1 };
+        // Counter-clockwise in world space, which SVG's downward Y makes
+        // sweep flag 0.
+        let sweep = ccw_sweep(start_angle, end_angle);
+        let large_arc = if sweep > 180.0 { 1 } else { 0 };
+        let sweep_flag = 0;
         let _ = write!(
             self.body,
             "<path d=\"M {x1} {y1} A {radius} {radius} 0 {large_arc} {sweep_flag} {x2} {y2}\" stroke=\"{color}\" stroke-width=\"{stroke_width}\" fill=\"none\" stroke-linecap=\"round\"/>"
@@ -186,9 +188,11 @@ impl RenderContext for SvgContext {
         let y1 = cy - ry * start_rad.sin();
         let x2 = cx + rx * end_rad.cos();
         let y2 = cy - ry * end_rad.sin();
-        let sweep = end_angle - start_angle;
-        let large_arc = if sweep.abs() > 180.0 { 1 } else { 0 };
-        let sweep_flag = if sweep >= 0.0 { 0 } else { 1 };
+        // Counter-clockwise in world space, which SVG's downward Y makes
+        // sweep flag 0.
+        let sweep = ccw_sweep(start_angle, end_angle);
+        let large_arc = if sweep > 180.0 { 1 } else { 0 };
+        let sweep_flag = 0;
         let _ = write!(
             self.body,
             "<path d=\"M {x1} {y1} A {rx} {ry} 0 {large_arc} {sweep_flag} {x2} {y2}\" stroke=\"{color}\" stroke-width=\"{stroke_width}\" fill=\"none\" stroke-linecap=\"round\"/>"

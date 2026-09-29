@@ -52,6 +52,8 @@ fn harness_records_round_trip() {
         assert!(text.contains("|RECORD=215|"));
         let fh = cf.read_stream("FileHeader").expect("FileHeader");
         assert!(!String::from_utf8_lossy(&fh).contains("RECORD=215"), "harness records belong in Additional");
+        assert!(!text.contains("|__"), "reserved writer keys must not reach the file: {text}");
+        assert!(text.contains("|OWNERINDEX=0"), "entries / type label point at the connector record (index after the header): {text}");
     }
     let parsed = sch::Document::from_bytes(bytes).expect("read");
     assert!(parsed.raw_records.is_empty(), "harness records must be typed");

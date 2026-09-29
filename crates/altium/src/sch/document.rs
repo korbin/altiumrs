@@ -11,7 +11,7 @@ use super::primitives::{
     Label, Line, NetLabel, NoErc, Parameter, ParameterSet, Pie, Polygon, Polyline, Port, PowerObject,
     Rectangle, RoundedRectangle, SheetEntry, SheetSymbol, SignalHarness, Symbol, TextFrame, Wire,
 };
-use crate::coord::CoordRect;
+use crate::coord::{Coord, CoordPoint, CoordRect};
 use crate::diagnostic::Diagnostic;
 
 /// A schematic document.
@@ -103,6 +103,52 @@ impl Document {
         }
         for j in &self.junctions {
             acc = acc.union_point(j.location);
+        }
+        for p in &self.ports {
+            acc = acc.union(CoordRect::from_center(p.location, Coord::from_raw(0), p.height));
+            let end = if p.style >= 4 {
+                CoordPoint::new(p.location.x, p.location.y + p.width)
+            } else {
+                CoordPoint::new(p.location.x + p.width, p.location.y)
+            };
+            acc = acc.union_point(end);
+        }
+        for ss in &self.sheet_symbols {
+            acc = acc.union_point(ss.location).union_point(CoordPoint::new(
+                ss.location.x + ss.x_size,
+                ss.location.y - ss.y_size,
+            ));
+        }
+        for hc in &self.harness_connectors {
+            acc = acc.union_point(hc.location).union_point(CoordPoint::new(
+                hc.location.x + hc.x_size,
+                hc.location.y - hc.y_size,
+            ));
+        }
+        for sh in &self.signal_harnesses {
+            for v in &sh.vertices {
+                acc = acc.union_point(*v);
+            }
+        }
+        for l in &self.net_labels {
+            acc = acc.union_point(l.location);
+        }
+        for p in &self.power_objects {
+            acc = acc.union_point(p.location);
+        }
+        for l in &self.labels {
+            acc = acc.union_point(l.location);
+        }
+        // The sheet frame itself, when the document uses a custom sheet size (DXP units).
+        if let Some(ss) = &self.sheet_settings {
+            let custom = ss.get("UseCustomSheet").is_some_and(|v| v == "T");
+            let dim = |k: &str| ss.get(k).and_then(|v| v.parse::<i32>().ok());
+            if let (true, Some(w), Some(h)) = (custom, dim("CustomX"), dim("CustomY")) {
+                acc = acc
+                    .union_point(CoordPoint::new(Coord::from_raw(0), Coord::from_raw(0)))
+                    .union_point(CoordPoint::new(Coord::from_raw(w.saturating_mul(100_000)),
+                                                 Coord::from_raw(h.saturating_mul(100_000))));
+            }
         }
         acc
     }

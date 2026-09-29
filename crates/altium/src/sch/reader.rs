@@ -217,10 +217,11 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
     let mut pin_frac: Option<Vec<u8>> = None;
     let mut pin_symbol_line_width: Option<Vec<u8>> = None;
     let mut pin_text_data: Option<Vec<u8>> = None;
+    let mut pin_propagation_delay: Option<Vec<u8>> = None;
     let mut additional_streams: BTreeMap<String, Vec<u8>> = BTreeMap::new();
 
     // Capture auxiliary streams.
-    let known: &[&str] = &["Data", "PinFrac", "PinSymbolLineWidth", "PinTextData"];
+    let known: &[&str] = &["Data", "PinFrac", "PinSymbolLineWidth", "PinTextData", "PinPropagationDelay"];
     let entries = cf.list_children(section_key)?;
     for entry in entries {
         if entry.name.eq_ignore_ascii_case("Data") {
@@ -237,6 +238,10 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
         }
         if entry.name.eq_ignore_ascii_case("PinTextData") && entry.is_stream {
             pin_text_data = Some(cf.read_stream(format!("{section_key}/PinTextData"))?);
+            continue;
+        }
+        if entry.name.eq_ignore_ascii_case("PinPropagationDelay") && entry.is_stream {
+            pin_propagation_delay = Some(cf.read_stream(format!("{section_key}/{}", entry.name))?);
             continue;
         }
         if known.iter().any(|n| entry.name.eq_ignore_ascii_case(n)) {
@@ -455,6 +460,19 @@ fn read_component(cf: &mut CompoundFile, section_key: &str) -> Result<Option<Com
     if let Some(bytes) = pin_text_data {
         apply_pin_text_data(&mut component.pins, &bytes);
     }
+    if let Some(bytes) = pin_propagation_delay {
+        // Entries that would not be rewritten byte for byte keep the stream raw.
+        match decode_pin_propagation_delay(&bytes, component.pins.len()) {
+            Some(delays) => {
+                for (idx, seconds) in delays {
+                    component.pins[idx].pin_propagation_delay = seconds;
+                }
+            }
+            None => {
+                component.additional_streams.insert("PinPropagationDelay".to_string(), bytes);
+            }
+        }
+    }
 
     Ok(Some(component))
 }
@@ -525,6 +543,39 @@ fn apply_pin_text_customisation(
     }
     *rotation_anchor = i32::from(c.rotation_anchor);
     *rotation_relative = c.rotation_relative;
+}
+
+/// `PinPropagationDelay`: one zlib entry per pin that has a delay, keyed by
+/// the pin's index; each entry is a `u32` byte length and UTF-16LE parameter
+/// text `|PINPROPAGATIONDELAY=5.384400E-011` (seconds). Returns `None` unless
+/// every entry parses and reformats to the same text, so the writer's copy
+/// matches the original.
+pub(crate) fn decode_pin_propagation_delay(data: &[u8], pin_count: usize) -> Option<Vec<(usize, f64)>> {
+    fn entry(name: &str, decoded: &[u8], pin_count: usize) -> Option<(usize, f64)> {
+        let idx: usize = name.parse().ok()?;
+        if idx >= pin_count {
+            return None;
+        }
+        let len = u32::from_le_bytes(decoded.get(0..4)?.try_into().ok()?) as usize;
+        if len % 2 != 0 || decoded.len() != 4 + len {
+            return None;
+        }
+        let units: Vec<u16> = decoded[4..].chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        let text = String::from_utf16(&units).ok()?;
+        let value = text.strip_prefix("|PINPROPAGATIONDELAY=")?;
+        let seconds: f64 = value.parse().ok()?;
+        (codec::altium_exponent_format(seconds) == value).then_some((idx, seconds))
+    }
+    let mut out = Vec::new();
+    let mut all_ok = true;
+    let read = read_compressed_storage(data, |name, decoded| {
+        match entry(name, decoded, pin_count) {
+            Some(e) => out.push(e),
+            None => all_ok = false,
+        }
+        Ok(())
+    });
+    (read.is_ok() && all_ok).then_some(out)
 }
 
 fn apply_pin_frac(pins: &mut [Pin], data: &[u8]) {

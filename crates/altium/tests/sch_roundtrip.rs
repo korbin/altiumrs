@@ -274,3 +274,28 @@ fn schdoc_round_trips_through_writer() {
         );
     }
 }
+
+/// Package pin delays live in the per-component `PinPropagationDelay`
+/// stream (seconds); they survive a write/read cycle, pins without a delay
+/// stay at zero, and nothing is left over as a raw stream.
+#[test]
+fn pin_propagation_delay_round_trips() {
+    use altium::sch::primitives::Pin;
+    let mut component = sch::Component::new("FPGA");
+    for (des, delay) in [("A1", 5.3844e-11), ("A2", 0.0), ("B7", 1.23456e-10)] {
+        component.pins.push(Pin {
+            designator: Some(des.into()),
+            name: Some(des.into()),
+            pin_propagation_delay: delay,
+            ..Default::default()
+        });
+    }
+    let mut library = sch::Library::default();
+    library.components.push(component);
+    let bytes = library.to_bytes().expect("write");
+    let reread = sch::Library::from_bytes(bytes).expect("read");
+    let pins = &reread.components[0].pins;
+    let delays: Vec<f64> = pins.iter().map(|p| p.pin_propagation_delay).collect();
+    assert_eq!(delays, vec![5.3844e-11, 0.0, 1.23456e-10]);
+    assert!(!reread.components[0].additional_streams.contains_key("PinPropagationDelay"));
+}

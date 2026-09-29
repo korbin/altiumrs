@@ -230,6 +230,9 @@ fn write_component(cf: &mut CompoundFile, component: &Component, section_key: &s
     if let Some(pin_text) = build_pin_text_data(&component.pins)? {
         cf.write_stream(format!("{section_key}/PinTextData"), &pin_text)?;
     }
+    if let Some(delays) = build_pin_propagation_delay(&component.pins)? {
+        cf.write_stream(format!("{section_key}/PinPropagationDelay"), &delays)?;
+    }
 
     for (name, data) in &component.additional_streams {
         cf.write_stream(format!("{section_key}/{name}"), data)?;
@@ -649,6 +652,35 @@ fn build_pin_frac(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
     let mut bw = BinaryWriter::new(&mut buf);
     let mut header = ParameterMap::new();
     header.insert("HEADER", "PinFrac");
+    header.insert("Weight", entries.len().to_string());
+    write_compressed_storage(&mut bw, &header, &entries)?;
+    Ok(Some(buf.into_inner()))
+}
+
+/// Per-pin `PinPropagationDelay` stream: one zlib-compressed entry per pin
+/// with a non-zero delay, a `u32` byte length and the UTF-16LE text
+/// `|PINPROPAGATIONDELAY=<seconds>` in Altium's fixed-exponent form, as
+/// Altium writes it (pins without a delay get no entry).
+pub(crate) fn build_pin_propagation_delay(pins: &[Pin]) -> Result<Option<Vec<u8>>> {
+    let mut entries: Vec<(String, Vec<u8>)> = Vec::new();
+    for (i, pin) in pins.iter().enumerate() {
+        if pin.pin_propagation_delay == 0.0 {
+            continue;
+        }
+        let text = format!("|PINPROPAGATIONDELAY={}", codec::altium_exponent_format(pin.pin_propagation_delay));
+        let utf16: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
+        let mut body = Vec::with_capacity(4 + utf16.len());
+        body.extend_from_slice(&(utf16.len() as u32).to_le_bytes());
+        body.extend_from_slice(&utf16);
+        entries.push((i.to_string(), body));
+    }
+    if entries.is_empty() {
+        return Ok(None);
+    }
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    let mut bw = BinaryWriter::new(&mut buf);
+    let mut header = ParameterMap::new();
+    header.insert("HEADER", "PinPropagationDelay");
     header.insert("Weight", entries.len().to_string());
     write_compressed_storage(&mut bw, &header, &entries)?;
     Ok(Some(buf.into_inner()))
@@ -1093,7 +1125,9 @@ impl Document {
                     emit_typed(&mut abw, "218", |p| codec::signal_harness_to_params(sh, p))?;
                 }
             }
-            cf.write_stream("Additional", &abuf.into_inner())?;
+            // Same pass as the main stream: strips the reserved `__` keys (the
+            // structural `__OWNERRESOLVED` stamps on entries / type labels).
+            cf.write_stream("Additional", &resolve_owner_indices(&abuf.into_inner()))?;
         }
 
         for (path, data) in &self.additional_streams {
@@ -1146,3 +1180,36 @@ fn write_c_string_param_block<W: Write + Seek>(
         Ok(())
     })
 }
+
+#[cfg(test)]
+mod pin_propagation_delay_tests {
+    use super::*;
+    use crate::sch::binary::read_compressed_storage;
+
+    /// Entries use the layout Altium writes: a u32 byte length and UTF-16LE
+    /// `|PINPROPAGATIONDELAY=5.384400E-011`, keyed by pin index, zero-delay
+    /// pins skipped; the reader decodes them back.
+    #[test]
+    fn stream_matches_altium_layout() {
+        let mut pins = vec![Pin::default(), Pin::default(), Pin::default()];
+        pins[0].pin_propagation_delay = 5.3844e-11;
+        pins[2].pin_propagation_delay = 6.1864e-11;
+        let stream = build_pin_propagation_delay(&pins).unwrap().expect("stream");
+        let mut entries = Vec::new();
+        read_compressed_storage(&stream, |name, decoded| {
+            entries.push((name.to_string(), decoded.to_vec()));
+            Ok(())
+        })
+        .unwrap();
+        let text = "|PINPROPAGATIONDELAY=5.384400E-011";
+        let mut expected = (2 * text.len() as u32).to_le_bytes().to_vec();
+        expected.extend(text.encode_utf16().flat_map(u16::to_le_bytes));
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0], ("0".to_string(), expected));
+        assert_eq!(entries[1].0, "2");
+        let decoded = crate::sch::reader::decode_pin_propagation_delay(&stream, pins.len()).expect("decodes");
+        assert_eq!(decoded, vec![(0, 5.3844e-11), (2, 6.1864e-11)]);
+        assert!(build_pin_propagation_delay(&[Pin::default()]).unwrap().is_none());
+    }
+}
+

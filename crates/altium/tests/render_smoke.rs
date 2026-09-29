@@ -187,6 +187,33 @@ fn render_sch_to_svg_with_pin_glyphs() {
 }
 
 #[test]
+fn rotated_label_and_parameter_turn_once() {
+    use sch::primitives::{Label, Parameter};
+    let mut comp = build_synth_sch();
+    let mut label = Label::default();
+    label.text = "BANK 47".into();
+    label.location = CoordPoint::new(Coord::from_mils(-30.0), Coord::from_mils(-20.0));
+    label.rotation = 90.0;
+    comp.labels.push(label);
+    let mut param = Parameter::default();
+    param.name = "Comment".into();
+    param.value = "VERTICAL".into();
+    param.is_visible = true;
+    param.orientation = 1;
+    comp.parameters.push(param);
+    let svg = comp.render_svg(RenderOptions::default());
+    for text in ["BANK 47", "VERTICAL"] {
+        // The rotated group turns the text; the element itself must not add
+        // a second quarter turn.
+        let end = svg.find(&format!(">{text}</text>")).expect(text);
+        let start = svg[..end].rfind("<text").unwrap();
+        assert!(!svg[start..end].contains("rotate("), "{text} rotated twice: {}", &svg[start..end]);
+        let group = svg[..start].rfind("<g transform=\"rotate(").expect("rotated group");
+        assert!(svg[group..start].starts_with("<g transform=\"rotate(-90)\">"), "{text}: {}", &svg[group..start]);
+    }
+}
+
+#[test]
 fn render_sch_to_png_works() {
     let comp = build_synth_sch();
     let png = comp.render_png(RenderOptions::default()).expect("png");
@@ -600,4 +627,44 @@ fn embedded_board_resolves_file_loader_against_testdata_pair() {
         primitive_count > 50,
         "expected many primitives from 3×4 sub-board replication, got {primitive_count}"
     );
+}
+
+#[test]
+fn harness_objects_render() {
+    use sch::primitives::{HarnessConnector, HarnessEntry, Port, SignalHarness};
+    let mut doc = sch::Document::default();
+    let mut hc = HarnessConnector::default();
+    hc.location = CoordPoint::new(Coord::from_mils(1000.0), Coord::from_mils(1000.0));
+    hc.x_size = Coord::from_mils(400.0);
+    hc.y_size = Coord::from_mils(300.0);
+    hc.side = 1;
+    hc.primary_connection_position = Coord::from_mils(100.0);
+    for (i, name) in ["D_P", "D_N"].iter().enumerate() {
+        let mut e = HarnessEntry::default();
+        e.name = name.to_string();
+        e.distance_from_top = Coord::from_mils(100.0 * (i as f64 + 1.0));
+        hc.entries.push(e);
+    }
+    doc.harness_connectors.push(hc);
+    let mut sh = SignalHarness::default();
+    sh.vertices = vec![
+        CoordPoint::new(Coord::from_mils(1400.0), Coord::from_mils(900.0)),
+        CoordPoint::new(Coord::from_mils(1600.0), Coord::from_mils(900.0)),
+    ];
+    doc.signal_harnesses.push(sh);
+    let mut port = Port::default();
+    port.location = CoordPoint::new(Coord::from_mils(1600.0), Coord::from_mils(900.0));
+    port.width = Coord::from_mils(600.0);
+    port.height = Coord::from_mils(100.0);
+    port.style = 2;
+    port.name = "CLK".into();
+    port.harness_type = Some("LVDS".into());
+    doc.ports.push(port);
+    let svg = doc.render_svg(RenderOptions::default());
+    for text in ["D_P", "D_N", "CLK"] {
+        assert!(svg.contains(&format!(">{text}<")), "missing {text}");
+    }
+    // Connector primary marker + harness-port outline.
+    assert!(svg.matches("<polygon").count() >= 2, "{svg}");
+    assert!(svg.contains("<polyline") || svg.matches("<line").count() >= 3);
 }

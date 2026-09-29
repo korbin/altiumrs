@@ -110,7 +110,10 @@ sch_struct! {
         pub symbol_outside: i32,
         pub symbol_line_width: i32,
         pub swap_id_part: Option<String>,
-        pub pin_propagation_delay: i32,
+        // Package propagation delay in seconds (5.3844E-11 = 53.8 ps). Text
+        // records carry it as PINPROPAGATIONDELAY; library components keep
+        // it in the per-component PinPropagationDelay stream.
+        pub pin_propagation_delay: f64,
         pub designator_custom_font_id: i32,
         pub name_custom_font_id: i32,
         pub width: i32,

@@ -335,7 +335,7 @@ pub fn pin_from_params(params: &ParameterMap) -> Pin {
         symbol_outside: d.symbol_outside,
         symbol_line_width: d.symbol_line_width,
         swap_id_part: d.swap_id_part.clone(),
-        pin_propagation_delay: d.pin_propagation_delay as i32,
+        pin_propagation_delay: d.pin_propagation_delay,
         designator_custom_font_id: d.designator_custom_font_id,
         name_custom_font_id: d.name_custom_font_id,
         width: d.width,
@@ -418,7 +418,7 @@ pub fn pin_to_params(pin: &Pin, params: &mut ParameterMap) {
     d.symbol_outside = pin.symbol_outside;
     d.symbol_line_width = pin.symbol_line_width;
     d.swap_id_part = pin.swap_id_part.clone();
-    d.pin_propagation_delay = pin.pin_propagation_delay as f64;
+    d.pin_propagation_delay = pin.pin_propagation_delay;
     d.designator_custom_font_id = pin.designator_custom_font_id;
     d.name_custom_font_id = pin.name_custom_font_id;
     d.width = pin.width;
@@ -454,7 +454,7 @@ pub fn pin_to_params(pin: &Pin, params: &mut ParameterMap) {
     // Written on every pin, in the fixed-exponent form the vendor uses.
     params.insert(
         "PINPROPAGATIONDELAY",
-        altium_exponent_format(f64::from(pin.pin_propagation_delay)),
+        altium_exponent_format(pin.pin_propagation_delay),
     );
 }
 
@@ -490,7 +490,7 @@ fn pin_text_conglomerate(
 
 /// `1.500000E+002` style: six decimals, explicit exponent sign, three
 /// exponent digits.
-fn altium_exponent_format(v: f64) -> String {
+pub(crate) fn altium_exponent_format(v: f64) -> String {
     let s = format!("{v:.6E}");
     let (mantissa, exp) = s.split_once('E').unwrap_or((&s, "0"));
     let exp: i32 = exp.parse().unwrap_or(0);

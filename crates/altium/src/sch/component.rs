@@ -291,31 +291,39 @@ impl Component {
     }
 
     /// Bounding box across every graphical primitive owned by the component.
+    /// Whether a primitive owned by this component belongs to the part / display mode shown
+    /// (shared primitives have `OWNERPARTID` <= 0).
+    pub fn shows(&self, c: &super::primitives::PrimitiveCommon) -> bool {
+        let part = if self.current_part_id > 0 { self.current_part_id } else { 1 };
+        (c.owner_part_id <= 0 || c.owner_part_id == part)
+            && (self.display_mode_count <= 1 || c.owner_part_display_mode == self.display_mode)
+    }
+
     pub fn bounds(&self) -> CoordRect {
         let mut acc = CoordRect::EMPTY;
-        for p in &self.pins {
+        for p in self.pins.iter().filter(|p| self.shows(&p.common)) {
             acc = acc.union(p.bounds());
         }
-        for r in &self.rectangles {
+        for r in self.rectangles.iter().filter(|x| self.shows(&x.common)) {
             acc = acc.union(CoordRect::from_corners(r.corner1, r.corner2));
         }
-        for r in &self.rounded_rectangles {
+        for r in self.rounded_rectangles.iter().filter(|x| self.shows(&x.common)) {
             acc = acc.union(CoordRect::from_corners(r.corner1, r.corner2));
         }
-        for line in &self.lines {
+        for line in self.lines.iter().filter(|x| self.shows(&x.common)) {
             acc = acc.union(CoordRect::from_corners(line.start, line.end));
         }
-        for poly in &self.polygons {
+        for poly in self.polygons.iter().filter(|x| self.shows(&x.common)) {
             for v in &poly.vertices {
                 acc = acc.union_point(*v);
             }
         }
-        for poly in &self.polylines {
+        for poly in self.polylines.iter().filter(|x| self.shows(&x.common)) {
             for v in &poly.vertices {
                 acc = acc.union_point(*v);
             }
         }
-        for arc in &self.arcs {
+        for arc in self.arcs.iter().filter(|x| self.shows(&x.common)) {
             let r = arc.radius;
             acc = acc.union(CoordRect::from_xyxy(
                 arc.center.x - r,
@@ -324,7 +332,7 @@ impl Component {
                 arc.center.y + r,
             ));
         }
-        for e in &self.ellipses {
+        for e in self.ellipses.iter().filter(|x| self.shows(&x.common)) {
             acc = acc.union(CoordRect::from_xyxy(
                 e.center.x - e.radius_x,
                 e.center.y - e.radius_y,

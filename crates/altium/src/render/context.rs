@@ -245,6 +245,14 @@ pub trait RenderContext {
     }
 }
 
+/// Counter-clockwise sweep in degrees from `start` to `end`, in [0, 360).
+/// Altium draws every arc counter-clockwise from its start angle, wrapping
+/// through 0° when the end angle is the smaller one: 270° to 90° is the
+/// right half of the circle, 350° to 10° a 20° arc.
+pub(crate) fn ccw_sweep(start: f64, end: f64) -> f64 {
+    (end - start).rem_euclid(360.0)
+}
+
 /// Render-time options shared by raster and vector backends.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
@@ -265,6 +273,24 @@ impl Default for RenderOptions {
             height: 512,
             padding: 16,
             background: Some(Color::WHITE),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ccw_sweep;
+
+    #[test]
+    fn arcs_sweep_counter_clockwise_through_zero() {
+        for (start, end, sweep) in [
+            (2.3, 177.7, 175.4),
+            (90.0, 270.0, 180.0),
+            (270.0, 90.0, 180.0),
+            (350.0, 10.0, 20.0),
+            (-90.0, 90.0, 180.0),
+        ] {
+            assert!((ccw_sweep(start, end) - sweep).abs() < 1e-9, "{start} -> {end}");
         }
     }
 }

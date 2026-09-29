@@ -82,7 +82,7 @@ fn document_pins_are_text_records_with_inline_customisation() {
     p.designator_font_mode = 1;
     p.designator_custom_font_id = 3;
     p.designator_custom_color = 16_711_680;
-    p.pin_propagation_delay = 0;
+    p.pin_propagation_delay = 0.0;
     p.swap_id_part = Some("0¦&¦1".into());
 
     let mut doc = sch::Document::default();

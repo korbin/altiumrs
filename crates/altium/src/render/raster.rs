@@ -8,7 +8,7 @@ use cosmic_text::{
 };
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, PathBuilder, Pixmap, Stroke, Transform};
 
-use super::context::{RenderContext, RenderOptions, TextAnchorH, TextAnchorV, TextStyle};
+use super::context::{RenderContext, RenderOptions, TextAnchorH, TextAnchorV, TextStyle, ccw_sweep};
 use crate::color::Color;
 
 pub struct TinySkiaContext {
@@ -238,8 +238,8 @@ impl RenderContext for TinySkiaContext {
         const STEP: f64 = 5.0;
         let mut pb = PathBuilder::new();
         let mut first = true;
-        let start = start_angle.min(end_angle);
-        let end = start_angle.max(end_angle);
+        let start = start_angle;
+        let end = start + ccw_sweep(start_angle, end_angle);
         let mut a = start;
         while a <= end {
             let r = a.to_radians();
@@ -283,8 +283,8 @@ impl RenderContext for TinySkiaContext {
         const STEP: f64 = 5.0;
         let mut pb = PathBuilder::new();
         let mut first = true;
-        let start = start_angle.min(end_angle);
-        let end = start_angle.max(end_angle);
+        let start = start_angle;
+        let end = start + ccw_sweep(start_angle, end_angle);
         let mut a = start;
         while a <= end {
             let r = a.to_radians();
@@ -615,5 +615,32 @@ fn blit_glyph(
             let dst_a = pixel_data[dst_idx + 3] as u32;
             pixel_data[dst_idx + 3] = (sa + (dst_a * inv) / 255) as u8;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn painted(ctx: &TinySkiaContext, x: u32, y: u32) -> bool {
+        let p = ctx.pixmap().pixel(x, y).expect("inside the canvas");
+        p.red() < 128 && p.green() < 128 && p.blue() < 128
+    }
+
+    #[test]
+    fn arc_wrapping_through_zero_draws_the_counter_clockwise_half() {
+        let mut ctx = TinySkiaContext::new(RenderOptions {
+            width: 100,
+            height: 100,
+            padding: 0,
+            background: Some(Color::WHITE),
+        });
+        // 270° to 90° counter-clockwise is the right half.
+        ctx.arc(50.0, 50.0, 30.0, 270.0, 90.0, 4.0, Color::BLACK);
+        assert!(painted(&ctx, 80, 50), "right half drawn");
+        assert!(!painted(&ctx, 20, 50), "left half left blank");
+        ctx.elliptical_arc(50.0, 50.0, 20.0, 10.0, 270.0, 90.0, 4.0, Color::BLACK);
+        assert!(painted(&ctx, 70, 50), "elliptical arc: right half drawn");
+        assert!(!painted(&ctx, 30, 50), "elliptical arc: left half left blank");
     }
 }

@@ -9,9 +9,9 @@ use crate::color::Color;
 use crate::coord::Coord;
 use crate::enums::{PinElectricalType, PinOrientation, PowerPortStyle, TextJustification};
 use crate::sch::primitives::{
-    Arc, Bezier, Bus, BusEntry, Ellipse, EllipticalArc, Image, Junction, Label, Line, NetLabel,
-    Parameter, Pie, Pin, Polygon, Polyline, Port, PowerObject, Rectangle, RoundedRectangle,
-    SheetSymbol, TextFrame, Wire,
+    Arc, Bezier, Bus, BusEntry, Ellipse, EllipticalArc, HarnessConnector, Image, Junction, Label,
+    Line, NetLabel, NoErc, Parameter, Pie, Pin, Polygon, Polyline, Port, PowerObject, PrimitiveCommon,
+    Rectangle, RoundedRectangle, SheetSymbol, SignalHarness, TextFrame, Wire,
 };
 use crate::sch::{Component, Document};
 
@@ -422,10 +422,11 @@ fn render_label<C: RenderContext>(
     let (x, y) = t.world_to_screen(l.location);
     let color = argb_or_default(l.color, Color::BLACK);
     let (h, v) = justification_anchors(l.justification);
+    // The context carries the rotation; a rotated style on top would turn
+    // the text twice (a 90° label came out upside down).
     let style = TextStyle {
         h_anchor: h,
         v_anchor: v,
-        rotation: l.rotation,
         ..TextStyle::default()
     };
     let resolved = resolve_string(&l.text, component);
@@ -451,10 +452,10 @@ fn render_net_label<C: RenderContext>(ctx: &mut C, t: &CoordTransform, nl: &NetL
     let color = argb_or_default(nl.color, Color::BLACK);
     let (h, v) = justification_anchors(nl.justification);
     let rotation = nl.orientation as f64 * 90.0;
+    // Rotated through the context only (see `render_label`).
     let style = TextStyle {
         h_anchor: h,
         v_anchor: v,
-        rotation,
         ..TextStyle::default()
     };
     if rotation != 0.0 {
@@ -481,10 +482,10 @@ fn render_parameter<C: RenderContext>(
     let color = argb_or_default(p.color, Color::BLACK);
     let (h, v) = justification_anchors(p.justification);
     let rotation = p.orientation as f64 * 90.0;
+    // Rotated through the context only (see `render_label`).
     let style = TextStyle {
         h_anchor: h,
         v_anchor: v,
-        rotation,
         ..TextStyle::default()
     };
     let text = resolve_string(&p.value, component);
@@ -646,32 +647,188 @@ fn render_image<C: RenderContext>(ctx: &mut C, t: &CoordTransform, image: &Image
     }
 }
 
-fn render_port<C: RenderContext>(ctx: &mut C, t: &CoordTransform, port: &Port) {
+/// Outline of an Altium port / harness body: `location` is the left end (horizontal styles 0-3) or
+/// the bottom end (vertical styles 4-7), `width` runs along the port and `height` is centred on it.
+/// Style: 0/4 no arrow, 1 left / 5 top, 2 right / 6 bottom, 3 / 7 both ends.
+fn port_outline(t: &CoordTransform, port: &Port) -> Vec<(f64, f64)> {
     let (x, y) = t.world_to_screen(port.location);
-    let w = t.scale_value(port.width).max(40.0);
-    let h = t.scale_value(port.height).max(20.0);
+    let len = t.scale_value(port.width).max(1.0);
+    let half = t.scale_value(port.height).max(2.0) / 2.0;
+    let tip = half.min(len / 2.0);
+    let vertical = port.style >= 4;
+    let (a_arrow, b_arrow) = match port.style % 4 {
+        1 => (true, false),
+        2 => (false, true),
+        3 => (true, true),
+        _ => (false, false),
+    };
+    // Local (u along the port from `location`, v across) -> screen.
+    let to_screen = |u: f64, v: f64| if vertical { (x + v, y - u) } else { (x + u, y + v) };
+    let mut pts = Vec::with_capacity(6);
+    if a_arrow {
+        pts.push(to_screen(0.0, 0.0));
+        pts.push(to_screen(tip, -half));
+    } else {
+        pts.push(to_screen(0.0, -half));
+    }
+    if b_arrow {
+        pts.push(to_screen(len - tip, -half));
+        pts.push(to_screen(len, 0.0));
+        pts.push(to_screen(len - tip, half));
+    } else {
+        pts.push(to_screen(len, -half));
+        pts.push(to_screen(len, half));
+    }
+    if a_arrow {
+        pts.push(to_screen(tip, half));
+    } else {
+        pts.push(to_screen(0.0, half));
+    }
+    pts
+}
+
+fn render_port<C: RenderContext>(ctx: &mut C, t: &CoordTransform, port: &Port) {
+    let harness = port.harness_type.as_deref().is_some_and(|h| !h.trim().is_empty());
     let stroke = argb_or_default(port.color, Color::BLACK);
-    let fill = if port.area_color != 0 {
+    let fill = if harness && port.harness_color != 0 {
+        Some(Color::from_altium_bgr(port.harness_color))
+    } else if port.area_color != 0 {
         Some(Color::from_altium_bgr(port.area_color))
     } else {
         None
     };
-    // Simplified port: rectangle with the name centered.
-    ctx.rectangle(x - w / 2.0, y - h / 2.0, w, h, 1.0, Some(stroke), fill);
+    let pts = port_outline(t, port);
+    ctx.polygon(&pts, if harness { 2.0 } else { 1.0 }, Some(stroke), fill);
     if !port.name.is_empty() {
-        ctx.text_styled(
-            x,
-            y,
-            DEFAULT_FONT_SIZE,
-            &port.name,
-            argb_or_default(port.text_color, Color::BLACK),
-            TextStyle {
-                h_anchor: TextAnchorH::Center,
-                v_anchor: TextAnchorV::Middle,
-                ..TextStyle::default()
-            },
-        );
+        let (x, y) = t.world_to_screen(port.location);
+        let len = t.scale_value(port.width).max(1.0);
+        let vertical = port.style >= 4;
+        let (tx, ty) = if vertical { (x, y - len / 2.0) } else { (x + len / 2.0, y) };
+        let style = TextStyle {
+            h_anchor: TextAnchorH::Center,
+            v_anchor: TextAnchorV::Middle,
+            ..TextStyle::default()
+        };
+        let color = argb_or_default(port.text_color, Color::BLACK);
+        if vertical {
+            ctx.save_state();
+            ctx.translate(tx, ty);
+            ctx.rotate(-90.0);
+            ctx.text_styled(0.0, 0.0, DEFAULT_FONT_SIZE, &port.name, color, style);
+            ctx.restore_state();
+        } else {
+            ctx.text_styled(tx, ty, DEFAULT_FONT_SIZE, &port.name, color, style);
+        }
     }
+}
+
+/// Harness connector: body box, a heavy primary edge with a marker at the primary connection
+/// point, entry names inside the body along the entry edge, and the harness-type label when shown.
+fn render_harness_connector<C: RenderContext>(ctx: &mut C, t: &CoordTransform, hc: &HarnessConnector) {
+    let (x, y) = t.world_to_screen(hc.location);
+    let w = t.scale_value(hc.x_size);
+    let h = t.scale_value(hc.y_size);
+    let stroke = argb_or_default(hc.color, Color::BLACK);
+    let fill = if hc.area_color != 0 { Some(Color::from_altium_bgr(hc.area_color)) } else { None };
+    ctx.rectangle(x, y, w, h, line_width_px(hc.line_width), Some(stroke), fill);
+    // Primary side: 0 left, 1 right, 2 top, 3 bottom.
+    let p = t.scale_value(hc.primary_connection_position);
+    let m = (t.scale_value(Coord::from_raw(300_000))).max(3.0);
+    let (edge, marker): ([(f64, f64); 2], Vec<(f64, f64)>) = match hc.side {
+        1 => ([(x + w, y), (x + w, y + h)], vec![(x + w, y + p), (x + w - m, y + p - m), (x + w - m, y + p + m)]),
+        2 => ([(x, y), (x + w, y)], vec![(x + p, y), (x + p - m, y + m), (x + p + m, y + m)]),
+        3 => ([(x, y + h), (x + w, y + h)], vec![(x + p, y + h), (x + p - m, y + h - m), (x + p + m, y + h - m)]),
+        _ => ([(x, y), (x, y + h)], vec![(x, y + p), (x + m, y + p - m), (x + m, y + p + m)]),
+    };
+    ctx.line(edge[0].0, edge[0].1, edge[1].0, edge[1].1, 3.0, stroke);
+    ctx.polygon(&marker, 1.0, Some(stroke), Some(stroke));
+    for e in &hc.entries {
+        let d = t.scale_value(e.distance_from_top);
+        let color = argb_or_default(e.color, stroke);
+        let tick = m;
+        let (ex, ey, lx, anchor) = match e.side {
+            1 => (x + w, y + d, x + w - tick - 2.0, TextAnchorH::Right),
+            _ => (x, y + d, x + tick + 2.0, TextAnchorH::Left),
+        };
+        let tx = if e.side == 1 { ex - tick } else { ex + tick };
+        ctx.line(ex, ey, tx, ey, 1.0, color);
+        if !e.name.is_empty() {
+            ctx.text_styled(
+                lx,
+                ey,
+                DEFAULT_FONT_SIZE * 0.8,
+                &e.name,
+                argb_or_default(e.text_color, color),
+                TextStyle { h_anchor: anchor, v_anchor: TextAnchorV::Middle, ..TextStyle::default() },
+            );
+        }
+    }
+    if let Some(ht) = &hc.harness_type {
+        if !ht.is_hidden && !ht.text.is_empty() {
+            let (hx, hy) = t.world_to_screen(ht.location);
+            ctx.text_styled(
+                hx,
+                hy - 2.0,
+                DEFAULT_FONT_SIZE * 0.85,
+                &ht.text,
+                argb_or_default(ht.color, stroke),
+                TextStyle { h_anchor: TextAnchorH::Left, v_anchor: TextAnchorV::Bottom, ..TextStyle::default() },
+            );
+        }
+    }
+}
+
+fn render_sheet_annotation<C: RenderContext>(
+    ctx: &mut C,
+    t: &CoordTransform,
+    ann: &std::collections::BTreeMap<String, String>,
+    bold: bool,
+) {
+    let text = match ann.get("Text") {
+        Some(v) if !v.is_empty() => v,
+        _ => return,
+    };
+    if ann.get("IsHidden").is_some_and(|v| v == "T") {
+        return;
+    }
+    let dxp = |k: &str| {
+        let whole = ann.get(k).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        let frac = ann.get(&format!("{k}_Frac")).and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+        Coord::from_raw((whole * 100_000 + frac).clamp(i32::MIN as i64, i32::MAX as i64) as i32)
+    };
+    let (x, y) = t.world_to_screen(crate::coord::CoordPoint::new(dxp("Location.X"), dxp("Location.Y")));
+    let color = ann
+        .get("Color")
+        .and_then(|v| v.parse::<i32>().ok())
+        .map(|c| argb_or_default(c, Color::BLACK))
+        .unwrap_or(Color::BLACK);
+    ctx.text_styled(
+        x,
+        y,
+        if bold { DEFAULT_FONT_SIZE * 1.1 } else { DEFAULT_FONT_SIZE * 0.9 },
+        text,
+        color,
+        TextStyle { h_anchor: TextAnchorH::Left, v_anchor: TextAnchorV::Bottom, ..TextStyle::default() },
+    );
+}
+
+/// No-ERC directive: Altium's default glyph is a small cross centred on the location.
+fn render_no_erc<C: RenderContext>(ctx: &mut C, t: &CoordTransform, n: &NoErc) {
+    let (x, y) = t.world_to_screen(n.location);
+    let r = t.scale_value(Coord::from_raw(300_000)).max(2.5);
+    let color = argb_or_default(n.color, Color::rgb(0xFF, 0x00, 0x00));
+    let w = if n.is_active { 1.5 } else { 1.0 };
+    ctx.line(x - r, y - r, x + r, y + r, w, color);
+    ctx.line(x - r, y + r, x + r, y - r, w, color);
+}
+
+fn render_signal_harness<C: RenderContext>(ctx: &mut C, t: &CoordTransform, sh: &SignalHarness) {
+    if sh.vertices.len() < 2 {
+        return;
+    }
+    let pts: Vec<_> = sh.vertices.iter().map(|v| t.world_to_screen(*v)).collect();
+    let color = argb_or_default(sh.color, DEFAULT_WIRE);
+    ctx.polyline(&pts, (line_width_px(sh.line_width) * 2.0).max(4.0), color);
 }
 
 fn render_sheet_symbol<C: RenderContext>(ctx: &mut C, t: &CoordTransform, ss: &SheetSymbol) {
@@ -726,8 +883,27 @@ fn render_sheet_symbol<C: RenderContext>(ctx: &mut C, t: &CoordTransform, ss: &S
             2 => (x + dist, y, TextAnchorH::Center),
             _ => (x + dist, y + h, TextAnchorH::Center),
         };
-        // Small tick to mark the entry pin position.
+        // Small tick to mark the entry pin position; harness entries get a filled block-and-triangle.
         let tick = 4.0;
+        if entry.harness_type.as_deref().is_some_and(|h| !h.trim().is_empty()) {
+            let hs = 3.0;
+            let hcolor = if entry.harness_color != 0 {
+                Color::from_altium_bgr(entry.harness_color)
+            } else {
+                entry_color
+            };
+            let dir = if entry.side == 1 { -1.0 } else { 1.0 };
+            if entry.side <= 1 {
+                let pts = [
+                    (ex, ey - hs),
+                    (ex + dir * 2.0 * hs, ey - hs),
+                    (ex + dir * 3.0 * hs, ey),
+                    (ex + dir * 2.0 * hs, ey + hs),
+                    (ex, ey + hs),
+                ];
+                ctx.polygon(&pts, 1.0, Some(entry_color), Some(hcolor));
+            }
+        }
         match entry.side {
             0 => ctx.line(ex - tick, ey, ex, ey, 1.0, entry_color),
             1 => ctx.line(ex, ey, ex + tick, ey, 1.0, entry_color),
@@ -736,9 +912,10 @@ fn render_sheet_symbol<C: RenderContext>(ctx: &mut C, t: &CoordTransform, ss: &S
         }
         if !entry.name.is_empty() {
             // Push the label inside the symbol body by a small offset.
+            let inset = if entry.harness_type.as_deref().is_some_and(|h| !h.trim().is_empty()) { 9.0 } else { 0.0 };
             let (label_x, label_y) = match entry.side {
-                0 => (ex + tick + 2.0, ey),
-                1 => (ex - tick - 2.0, ey),
+                0 => (ex + tick + 2.0 + inset, ey),
+                1 => (ex - tick - 2.0 - inset, ey),
                 2 => (ex, ey + tick + 2.0),
                 _ => (ex, ey - tick - 2.0),
             };
@@ -775,28 +952,34 @@ fn render_pin<C: RenderContext>(ctx: &mut C, t: &CoordTransform, pin: &Pin) {
     ctx.line(sx, sy, ex, ey, DEFAULT_LINE, color);
     render_pin_electrical(ctx, t, pin.electrical_type, sx, sy, pin.orientation, color);
 
-    // Pin name (at body end).
+    // Pin name: inside the body, just past the pin's inner end (`location`), as Altium draws
+    // it by default. The orientation is the direction the pin points out of the body, so the
+    // body lies on the opposite side of `location`. Vertical pins get their name turned 90°
+    // (reading bottom to top), anchored so the text runs into the body.
     if pin.show_name {
         if let Some(name) = &pin.name {
             let offset = 3.0;
-            let (nx, ny, h) = match pin.orientation {
-                PinOrientation::Right => (ex + offset, ey, TextAnchorH::Left),
-                PinOrientation::Left => (ex - offset, ey, TextAnchorH::Right),
-                PinOrientation::Up => (ex, ey - offset, TextAnchorH::Center),
-                PinOrientation::Down => (ex, ey + offset, TextAnchorH::Center),
+            let (nx, ny, h, rotation) = match pin.orientation {
+                PinOrientation::Right => (sx - offset, sy, TextAnchorH::Right, 0.0),
+                PinOrientation::Left => (sx + offset, sy, TextAnchorH::Left, 0.0),
+                PinOrientation::Up => (sx, sy + offset, TextAnchorH::Right, 90.0),
+                PinOrientation::Down => (sx, sy - offset, TextAnchorH::Left, 90.0),
             };
-            ctx.text_with_overline(
-                nx,
-                ny,
-                DEFAULT_FONT_SIZE,
-                name,
-                color,
-                TextStyle {
-                    h_anchor: h,
-                    v_anchor: TextAnchorV::Middle,
-                    ..TextStyle::default()
-                },
-            );
+            let style = TextStyle {
+                h_anchor: h,
+                v_anchor: TextAnchorV::Middle,
+                ..TextStyle::default()
+            };
+            if rotation != 0.0 {
+                // Rotated through the context only (see `render_label`).
+                ctx.save_state();
+                ctx.translate(nx, ny);
+                ctx.rotate(rotation);
+                ctx.text_with_overline(0.0, 0.0, DEFAULT_FONT_SIZE, name, color, style);
+                ctx.restore_state();
+            } else {
+                ctx.text_with_overline(nx, ny, DEFAULT_FONT_SIZE, name, color, style);
+            }
         }
     }
     // Pin designator.
@@ -883,7 +1066,9 @@ fn render_pin_electrical<C: RenderContext>(
         let offset = if matches!(electrical, E::InputOutput) {
             arrow_gap
         } else {
-            0.0
+            // Apex one arrow-width out along the pin, so the triangle sits outside the body
+            // (where Altium draws it) and clear of the pin name.
+            arrow_w
         };
         let pts = if !is_vertical {
             let bx = x + offset * dir;
@@ -913,10 +1098,15 @@ fn render_power_object<C: RenderContext>(
     let (sx, sy) = t.world_to_screen(po.location);
     let color = argb_or_default(po.color, Color::BLACK);
 
+    // Altium's power-port orientation is the direction the symbol extends from its hotspot:
+    // 0° = right, 90° = up, 180° = left, 270° = down (GND is normally 270°). The glyph below
+    // is drawn pointing up (screen -y, i.e. 90°), so turn it by `rotation - 90`.
+    let quadrant = ((po.rotation / 90.0).round() as i64).rem_euclid(4);
     ctx.save_state();
     ctx.translate(sx, sy);
-    if po.rotation != 0.0 {
-        ctx.rotate(po.rotation);
+    let turn = quadrant as f64 * 90.0 - 90.0;
+    if turn != 0.0 {
+        ctx.rotate(turn);
     }
     if po.is_mirrored {
         ctx.scale(-1.0, 1.0);
@@ -926,29 +1116,28 @@ fn render_power_object<C: RenderContext>(
     render_power_port_symbol(ctx, po.style, -PIN_LEN, color);
     ctx.restore_state();
 
+    // The net name stays horizontal (Altium never rotates it) and sits beyond the glyph in the
+    // direction the port points.
     if po.show_net_name && !po.text.is_empty() {
         let net = resolve_string(&po.text, component);
-        ctx.save_state();
-        ctx.translate(sx, sy);
-        if po.rotation != 0.0 {
-            ctx.rotate(po.rotation);
-        }
-        if po.is_mirrored {
-            ctx.scale(-1.0, 1.0);
-        }
+        let (dx, dy, h, v) = match quadrant {
+            0 => (PIN_LEN + 10.0, 0.0, TextAnchorH::Left, TextAnchorV::Middle),
+            2 => (-PIN_LEN - 10.0, 0.0, TextAnchorH::Right, TextAnchorV::Middle),
+            3 => (0.0, PIN_LEN + 12.0, TextAnchorH::Center, TextAnchorV::Top),
+            _ => (0.0, -PIN_LEN - 12.0, TextAnchorH::Center, TextAnchorV::Bottom),
+        };
         ctx.text_styled(
-            0.0,
-            -PIN_LEN - 12.0,
+            sx + dx,
+            sy + dy,
             DEFAULT_FONT_SIZE,
             &net,
             color,
             TextStyle {
-                h_anchor: TextAnchorH::Center,
-                v_anchor: TextAnchorV::Bottom,
+                h_anchor: h,
+                v_anchor: v,
                 ..TextStyle::default()
             },
         );
-        ctx.restore_state();
     }
 }
 
@@ -1020,64 +1209,130 @@ fn render_power_port_symbol<C: RenderContext>(
 
 // Entry points
 
+/// Whether a component-owned primitive belongs to the part (and display mode) being shown: shared
+/// primitives have `OWNERPARTID` <= 0.
+pub fn part_visible(c: &PrimitiveCommon, component: &Component) -> bool {
+    let part = if component.current_part_id > 0 { component.current_part_id } else { 1 };
+    (c.owner_part_id <= 0 || c.owner_part_id == part)
+        && (component.display_mode_count <= 1 || c.owner_part_display_mode == component.display_mode)
+}
+
 pub fn render_component<C: RenderContext>(ctx: &mut C, component: &Component, t: &CoordTransform) {
     let comp = Some(component);
+    let vis = |c: &PrimitiveCommon| part_visible(c, component);
     // Z-order: shapes/fills first, then lines/arcs, then pins/labels/parameters.
     for r in &component.rectangles {
+        if !vis(&r.common) {
+            continue;
+        }
         render_rectangle(ctx, t, r);
     }
     for r in &component.rounded_rectangles {
+        if !vis(&r.common) {
+            continue;
+        }
         render_rounded_rect(ctx, t, r);
     }
     for poly in &component.polygons {
+        if !vis(&poly.common) {
+            continue;
+        }
         render_polygon(ctx, t, poly);
     }
     for e in &component.ellipses {
+        if !vis(&e.common) {
+            continue;
+        }
         render_ellipse(ctx, t, e);
     }
     for ea in &component.elliptical_arcs {
+        if !vis(&ea.common) {
+            continue;
+        }
         render_elliptical_arc(ctx, t, ea);
     }
     for pie in &component.pies {
+        if !vis(&pie.common) {
+            continue;
+        }
         render_pie(ctx, t, pie);
     }
     for tf in &component.text_frames {
+        if !vis(&tf.common) {
+            continue;
+        }
         render_text_frame(ctx, t, tf);
     }
     for line in &component.lines {
+        if !vis(&line.common) {
+            continue;
+        }
         render_line(ctx, t, line);
     }
     for arc in &component.arcs {
+        if !vis(&arc.common) {
+            continue;
+        }
         render_arc(ctx, t, arc);
     }
     for poly in &component.polylines {
+        if !vis(&poly.common) {
+            continue;
+        }
         render_polyline(ctx, t, poly);
     }
     for bz in &component.beziers {
+        if !vis(&bz.common) {
+            continue;
+        }
         render_bezier(ctx, t, bz);
     }
     for w in &component.wires {
+        if !vis(&w.common) {
+            continue;
+        }
         render_wire(ctx, t, w);
     }
     for j in &component.junctions {
+        if !vis(&j.common) {
+            continue;
+        }
         render_junction(ctx, t, j);
     }
     for img in &component.images {
+        if !vis(&img.common) {
+            continue;
+        }
         render_image(ctx, t, img);
     }
     for pin in &component.pins {
+        if !vis(&pin.common) {
+            continue;
+        }
         render_pin(ctx, t, pin);
     }
     for label in &component.labels {
+        if !vis(&label.common) {
+            continue;
+        }
         render_label(ctx, t, label, comp);
     }
     for p in &component.parameters {
+        if !vis(&p.common) {
+            continue;
+        }
         render_parameter(ctx, t, p, comp);
     }
     for nl in &component.net_labels {
+        if !vis(&nl.common) {
+            continue;
+        }
         render_net_label(ctx, t, nl);
     }
     for po in &component.power_objects {
+        if !vis(&po.common) {
+            continue;
+        }
         render_power_object(ctx, t, po, comp);
     }
 }
@@ -1134,15 +1389,33 @@ pub fn render_document<C: RenderContext>(ctx: &mut C, document: &Document, t: &C
     for w in &document.wires {
         render_wire(ctx, t, w);
     }
+    for sh in &document.signal_harnesses {
+        render_signal_harness(ctx, t, sh);
+    }
     for j in &document.junctions {
         render_junction(ctx, t, j);
     }
-    // Sheet structures, ports.
+    for n in &document.no_ercs {
+        render_no_erc(ctx, t, n);
+    }
+    // Sheet structures, harness connectors, ports.
+    for hc in &document.harness_connectors {
+        render_harness_connector(ctx, t, hc);
+    }
     for ss in &document.sheet_symbols {
         render_sheet_symbol(ctx, t, ss);
     }
     for p in &document.ports {
         render_port(ctx, t, p);
+    }
+    // Sheet-symbol name / file-name annotations (RECORD 32 / 33, kept as raw parameter maps).
+    for (ann, bold) in document
+        .sheet_name_annotations
+        .iter()
+        .map(|a| (a, true))
+        .chain(document.sheet_filename_annotations.iter().map(|a| (a, false)))
+    {
+        render_sheet_annotation(ctx, t, ann, bold);
     }
     // Text on top.
     for label in &document.labels {
