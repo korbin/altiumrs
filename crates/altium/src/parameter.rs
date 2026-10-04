@@ -116,6 +116,14 @@ impl<'a> Iterator for Parameters<'a> {
     }
 }
 
+/// Decode a value stored under a plain (non-`%UTF8%`) key. Plain values are
+/// normally Windows-1252, but Altium also writes some as raw UTF-8 with no
+/// `%UTF8%` copy (a PcbDoc component's `SOURCEDESCRIPTION`); read as
+/// Windows-1252 those became `Î©` and the writer re-encoded the mojibake.
+fn decode_plain(bytes: &[u8]) -> String {
+    crate::encoding::decode_utf8_or_1252(bytes)
+}
+
 fn trim_ascii_end(bytes: &[u8]) -> &[u8] {
     let mut end = bytes.len();
     while end > 0 && matches!(bytes[end - 1], b'\r' | b'\n' | b' ' | b'\t') {
@@ -231,7 +239,7 @@ impl ParameterMap {
             let value = if is_utf8 {
                 String::from_utf8_lossy(&entry[eq + 1..]).into_owned()
             } else {
-                crate::encoding::decode(&entry[eq + 1..])
+                decode_plain(&entry[eq + 1..])
             };
             map.insert_parsed(name, &value, is_utf8);
         }
@@ -489,6 +497,21 @@ mod tests {
         assert_eq!((entries[0].name, entries[0].value), ("FOO", "bar"));
         assert_eq!((entries[1].name, entries[1].value), ("BAZ", "42"));
         assert_eq!((entries[2].name, entries[2].value), ("EMPTY", ""));
+    }
+
+    #[test]
+    fn plain_value_holding_utf8_bytes_decodes_as_utf8() {
+        let map =
+            ParameterMap::parse_bytes(b"|SOURCEDESCRIPTION=3.3k\xCE\xA9 0402|ROTATION=90", b'|');
+        assert_eq!(map.get("SOURCEDESCRIPTION"), Some("3.3k\u{3A9} 0402"));
+    }
+
+    #[test]
+    fn plain_windows_1252_value_still_decodes_as_windows_1252() {
+        // 0xB5 = µ and 0xE9 = é in Windows-1252; neither is valid UTF-8.
+        let map = ParameterMap::parse_bytes(b"|VALUE=10\xB5F|NAME=Caf\xE9", b'|');
+        assert_eq!(map.get("VALUE"), Some("10\u{B5}F"));
+        assert_eq!(map.get("NAME"), Some("Caf\u{E9}"));
     }
 
     #[test]

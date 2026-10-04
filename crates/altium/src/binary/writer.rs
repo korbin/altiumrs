@@ -149,6 +149,22 @@ impl<W: Write + Seek> BinaryWriter<W> {
         })
     }
 
+    /// Write a size-prefixed block whose body is a one-byte-length-prefixed
+    /// UTF-8 string. Altium writes the 8-bit copy of a PCB text (Texts6) this
+    /// way (`47µF` = `34 37 C2 B5 46`), not as Windows-1252. Truncates at a
+    /// character boundary within 255 bytes.
+    pub fn write_pascal_utf8_string_block(&mut self, s: &str) -> Result<()> {
+        self.write_block(|w| {
+            let mut end = s.len().min(u8::MAX as usize);
+            while !s.is_char_boundary(end) {
+                end -= 1;
+            }
+            w.inner.write_u8(end as u8)?;
+            w.inner.write_all(&s.as_bytes()[..end])?;
+            Ok(())
+        })
+    }
+
     /// Write a size-prefixed block whose body is a NUL-terminated string.
     pub fn write_c_string_block(&mut self, s: &str) -> Result<()> {
         self.write_block(|w| {

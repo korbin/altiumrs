@@ -26,6 +26,44 @@ fn collect_with_extension(dir: &Path, ext_lower: &str) -> Vec<PathBuf> {
 }
 
 #[test]
+fn wide_strings_header_counts_texts() {
+    let mut doc = pcb::Document::default();
+    for i in 0..3 {
+        let mut t = pcb::Text::default();
+        t.text = format!("T{i}");
+        doc.texts.push(t);
+    }
+    let bytes = doc.to_bytes().expect("write");
+    let mut cf = altium::compound::CompoundFile::open(bytes).expect("open");
+    let header = |cf: &mut altium::compound::CompoundFile, path: &str| {
+        let raw = cf.read_stream(path).expect(path);
+        i32::from_le_bytes(raw[..4].try_into().unwrap())
+    };
+    assert_eq!(header(&mut cf, "WideStrings6/Header"), 3);
+    assert_eq!(header(&mut cf, "Texts6/Header"), 3);
+}
+
+#[test]
+fn texts6_string_copy_is_utf8() {
+    let mut doc = pcb::Document::default();
+    for s in ["47\u{B5}F", "10k\u{3A9}"] {
+        let mut t = pcb::Text::default();
+        t.text = s.to_string();
+        doc.texts.push(t);
+    }
+    let bytes = doc.to_bytes().expect("write");
+    let mut cf = altium::compound::CompoundFile::open(bytes.clone()).expect("open");
+    let data = cf.read_stream("Texts6/Data").expect("Texts6/Data");
+    let find = |needle: &[u8]| data.windows(needle.len()).any(|w| w == needle);
+    assert!(find(b"\x0547\xC2\xB5F"), "47µF not stored as UTF-8");
+    assert!(find(b"\x0510k\xCE\xA9"), "10kΩ not stored as UTF-8");
+    assert!(!find(b"&#937;"), "numeric character reference written");
+    let back = pcb::Document::from_bytes(bytes).expect("re-parse");
+    assert_eq!(back.texts[0].text, "47\u{B5}F");
+    assert_eq!(back.texts[1].text, "10k\u{3A9}");
+}
+
+#[test]
 fn read_every_pcblib_in_testdata() {
     let Some(dir) = testdata_dir() else {
         eprintln!("skipping: no testdata directory");
@@ -328,7 +366,11 @@ fn pcbdoc_typed_storages_populate() {
         total_classes += doc.classes.len();
         total_nets += doc.nets.len();
         total_assigned_pads += doc.components.iter().map(|c| c.pads.len()).sum::<usize>();
-        for r in doc.regions.iter().chain(doc.components.iter().flat_map(|c| c.regions.iter())) {
+        for r in doc
+            .regions
+            .iter()
+            .chain(doc.components.iter().flat_map(|c| c.regions.iter()))
+        {
             total_regions += 1;
             // SUBPOLYINDEX = -1 is the standalone-region default; any other
             // value means we actually parsed it off disk.
@@ -342,7 +384,11 @@ fn pcbdoc_typed_storages_populate() {
                 regions_with_arc_resolution += 1;
             }
         }
-        for p in doc.pads.iter().chain(doc.components.iter().flat_map(|c| c.pads.iter())) {
+        for p in doc
+            .pads
+            .iter()
+            .chain(doc.components.iter().flat_map(|c| c.pads.iter()))
+        {
             total_pads += 1;
             if p.is_surface_mount {
                 smt_pads += 1;
@@ -397,7 +443,10 @@ fn pcbdoc_typed_storages_populate() {
     // bottom signal layers (or through-hole pads that span both). If
     // any of these counters go to zero, the reader regressed on flag
     // derivation.
-    assert!(smt_pads > 0, "no SMT pads detected — flag derivation regression");
+    assert!(
+        smt_pads > 0,
+        "no SMT pads detected — flag derivation regression"
+    );
     assert!(
         pads_with_top_paste > 0,
         "no top-paste pads detected — flag derivation regression"
@@ -533,8 +582,7 @@ async fn flatten_embedded_boards_inlines_subdoc_primitives() {
 
     // Power Adapter Panel.PcbDoc has a 3×4 array of USB Power Adapter.PcbDoc.
     let board = &parent.embedded_boards[0];
-    let instances =
-        (board.col_count.max(1) as usize) * (board.row_count.max(1) as usize);
+    let instances = (board.col_count.max(1) as usize) * (board.row_count.max(1) as usize);
     assert_eq!(instances, 12, "fixture is 3×4");
 
     // Each sub-doc primitive should appear `instances` times in the flat
@@ -656,8 +704,14 @@ async fn flatten_subtracts_child_origin_and_remaps_indices() {
         ("ORIGINX".to_string(), "100mil".to_string()),
         ("ORIGINY".to_string(), "200mil".to_string()),
     ]);
-    sub.nets.push(pcb::Net { name: "VCC".into(), ..Default::default() });
-    sub.nets.push(pcb::Net { name: "GND".into(), ..Default::default() });
+    sub.nets.push(pcb::Net {
+        name: "VCC".into(),
+        ..Default::default()
+    });
+    sub.nets.push(pcb::Net {
+        name: "GND".into(),
+        ..Default::default()
+    });
     let mut sub_comp = pcb::Component::new("SUB-COMP");
     sub_comp.x = Coord::from_mils(150.0);
     sub_comp.y = Coord::from_mils(260.0);
@@ -687,7 +741,10 @@ async fn flatten_subtracts_child_origin_and_remaps_indices() {
     // Parent: its own component + pad on "GND", and the sub-board placed
     // so its board origin lands at (1000, 2000) mil.
     let mut parent = pcb::Document::default();
-    parent.nets.push(pcb::Net { name: "GND".into(), ..Default::default() });
+    parent.nets.push(pcb::Net {
+        name: "GND".into(),
+        ..Default::default()
+    });
     parent.components.push(pcb::Component::new("PARENT-COMP"));
     let mut ppad = pcb::Pad::default();
     ppad.size_top = CoordPoint::new(Coord::from_mils(40.0), Coord::from_mils(40.0));
@@ -846,10 +903,7 @@ async fn embedded_board_resolution_fails_cleanly_when_sibling_missing() {
     }
     let doc = pcb::Document::read(&parent).await.expect("read parent");
 
-    let empty = std::env::temp_dir().join(format!(
-        "altium-rs-empty-{}",
-        std::process::id()
-    ));
+    let empty = std::env::temp_dir().join(format!("altium-rs-empty-{}", std::process::id()));
     std::fs::create_dir_all(&empty).unwrap();
     let results = doc.resolve_embedded_boards_at(&empty).await;
     assert_eq!(results.len(), 1);
@@ -883,12 +937,14 @@ fn custom_shape_pads_pair_against_real_files() {
         let pairs = doc.custom_shape_pads();
         for csp in &pairs {
             assert_eq!(
-                csp.pad.layer, csp.region.layer,
+                csp.pad.layer,
+                csp.region.layer,
                 "pad/region layer mismatch in {}",
                 path.display()
             );
             assert_eq!(
-                csp.pad.component_index, csp.region.component_index,
+                csp.pad.component_index,
+                csp.region.component_index,
                 "pad/region component mismatch in {}",
                 path.display()
             );
@@ -911,4 +967,47 @@ fn custom_shape_pads_pair_against_real_files() {
         "no custom-shape pad/region pairs found across testdata — \
          either the matcher regressed or the testdata changed"
     );
+}
+
+#[test]
+fn edited_pad_fields_survive_raw_record_write() {
+    use altium::{Coord, CoordPoint};
+    let mut lib = pcb::Library::default();
+    lib.unique_id = "PADEDITA".into();
+    let mut comp = pcb::Component::new("PADEDIT");
+    comp.pads.push(
+        pcb::PadBuilder::new()
+            .at(Coord::ZERO, Coord::ZERO)
+            .size(Coord::from_mm(6.0), Coord::from_mm(6.0))
+            .hole_size(Coord::from_mm(3.73))
+            .layer(74)
+            .plated(true)
+            .designator("MH")
+            .build(),
+    );
+    lib.components.push(comp);
+    let mut parsed = pcb::Library::from_bytes(lib.to_bytes().unwrap()).expect("read back");
+    let pad = &mut parsed.components[0].pads[0];
+    assert!(
+        pad.raw_record.is_some(),
+        "a pad read from a file carries its raw record"
+    );
+
+    let big = CoordPoint::new(Coord::from_mm(9.37), Coord::from_mm(9.37));
+    pad.size_top = big;
+    pad.size_middle = big;
+    pad.size_bottom = big;
+    pad.hole_size = Coord::from_mm(6.35);
+    pad.is_plated = false;
+    pad.solder_mask_expansion = Coord::from_mm(0.1);
+    let again = pcb::Library::from_bytes(parsed.to_bytes().unwrap()).expect("read edited");
+    let p = &again.components[0].pads[0];
+    assert_eq!((p.size_top, p.size_middle, p.size_bottom), (big, big, big));
+    assert_eq!(p.hole_size, Coord::from_mm(6.35));
+    assert!(!p.is_plated);
+    assert_eq!(p.solder_mask_expansion, Coord::from_mm(0.1));
+
+    // An untouched pad still writes its record back byte for byte.
+    let reread = pcb::Library::from_bytes(again.to_bytes().unwrap()).unwrap();
+    assert_eq!(reread.components[0].pads[0].raw_record, p.raw_record);
 }

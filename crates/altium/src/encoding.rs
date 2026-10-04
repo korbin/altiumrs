@@ -16,6 +16,22 @@ pub fn decode(bytes: &[u8]) -> String {
     cow.into_owned()
 }
 
+/// Decode a legacy 8-bit field that Altium may have written as UTF-8.
+///
+/// Current Altium versions write some nominally Windows-1252 fields as raw
+/// UTF-8 (a PcbDoc component's `SOURCEDESCRIPTION`, the 8-bit copy of a PCB
+/// text string: `10kΩ` as `31 30 6B CE A9`). Non-ASCII bytes that form valid
+/// UTF-8 are taken as UTF-8; real Windows-1252 text (a lone `0xB5` for `µ`,
+/// `0xE9` for `é`) is almost never valid UTF-8 and decodes as before.
+pub fn decode_utf8_or_1252(bytes: &[u8]) -> String {
+    if !bytes.is_ascii() {
+        if let Ok(s) = std::str::from_utf8(bytes) {
+            return s.to_owned();
+        }
+    }
+    decode(bytes)
+}
+
 /// Encode `s` as Windows-1252, falling back to numeric character references
 /// (`&#NNNN;`) for characters outside the Windows-1252 repertoire.
 ///

@@ -934,7 +934,30 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
             pad.component_index,
         );
         patch_point(&mut b, 13, pad.location);
+        patch_point(&mut b, 21, pad.size_top);
+        patch_point(&mut b, 29, pad.size_middle);
+        patch_point(&mut b, 37, pad.size_bottom);
+        patch_i32(&mut b, 45, pad.hole_size.to_raw());
+        // Shape bytes stay raw: rounded rectangles keep 1 here with the real
+        // shape in the size/shape block, which the typed shape would lose.
         patch_f64(&mut b, 52, pad.rotation);
+        if b.len() > 60 && (b[60] != 0) != pad.is_plated {
+            patch_u8(&mut b, 60, u8::from(pad.is_plated));
+        }
+        // Mask expansions, with their manual/rule byte only when the value
+        // changes (an untouched record keeps whatever mode it had).
+        if b.len() >= 103 {
+            for (off, mode_off, v) in [
+                (86, 101, pad.paste_mask_expansion.to_raw()),
+                (90, 102, pad.solder_mask_expansion.to_raw()),
+            ] {
+                let old = i32::from_le_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+                if old != v {
+                    patch_i32(&mut b, off, v);
+                    patch_u8(&mut b, mode_off, if v != 0 { 2 } else { 0 });
+                }
+            }
+        }
         bw.write_block(|w| {
             w.write_bytes(&b)?;
             Ok(())
@@ -1282,7 +1305,9 @@ fn write_text<W: Write + Seek>(
         w.write_i32(text.snap_point_y.to_raw())?; // 248
         Ok(())
     })?;
-    bw.write_pascal_string_block(&text.text)
+    // The full text lives in WideStrings6; this 8-bit copy is UTF-8 in files
+    // Altium writes (`10kΩ` = `31 30 6B CE A9`), so match that.
+    bw.write_pascal_utf8_string_block(&text.text)
 }
 
 /// Altium's V7 layer identifier for a legacy layer byte (the value stored in
@@ -2429,7 +2454,9 @@ fn write_doc_wide_strings(cf: &mut CompoundFile, document: &Document) -> Result<
         return Ok(());
     }
     cf.create_storage("WideStrings6")?;
-    write_storage_header(cf, "WideStrings6/Header", 1)?;
+    // Altium stores the entry count here (one entry per text, the same number
+    // as Texts6/Header), not a record count of 1.
+    write_storage_header(cf, "WideStrings6/Header", document.texts.len() as i32)?;
     // Documents store wide strings as a binary index table:
     // [u32 index][u32 byte_len][UTF-16LE chars + NUL], one entry per text.
     // (The ENCODEDTEXT parameter-map flavor is only used inside footprint
