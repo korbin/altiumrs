@@ -9,6 +9,7 @@
 //! Round-trip: parse → mutate → re-emit. Unknown record kinds are preserved
 //! verbatim via the generic [`BomRecord`].
 
+#[cfg(feature = "async")]
 use std::path::Path;
 
 use indexmap::IndexMap;
@@ -64,6 +65,7 @@ impl BomDocument {
         Self::parse(&encoding::decode(&bytes))
     }
 
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
@@ -134,6 +136,7 @@ impl BomDocument {
         Ok(out)
     }
 
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         tokio::fs::write(path, self.to_bytes()?).await?;
         Ok(())

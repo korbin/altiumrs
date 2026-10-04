@@ -7,14 +7,63 @@ use serde::{Deserialize, Serialize};
 
 use crate::coord::{Coord, CoordPoint};
 
+/// How a vertex runs to the next: a straight line or an arc (the stored
+/// `KIND` integer: 0, 1). A stored value outside the two is kept as
+/// [`VertexKind::Unknown`] so it writes back unchanged. Serialized as the
+/// stored integer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "i32", into = "i32"))]
+pub enum VertexKind {
+    /// A straight run (`KIND` 0).
+    #[default]
+    Line,
+    /// An arc about the vertex's centre (`KIND` 1).
+    Arc,
+    /// Another stored value, kept verbatim.
+    Unknown(i32),
+}
+
+impl VertexKind {
+    /// The kind a stored `KIND` integer names.
+    pub fn from_raw(value: i32) -> Self {
+        match value {
+            0 => Self::Line,
+            1 => Self::Arc,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The integer this kind is stored as.
+    pub fn to_raw(self) -> i32 {
+        match self {
+            Self::Line => 0,
+            Self::Arc => 1,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<i32> for VertexKind {
+    fn from(value: i32) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl From<VertexKind> for i32 {
+    fn from(kind: VertexKind) -> i32 {
+        kind.to_raw()
+    }
+}
+
 /// One vertex of a [`Polygon`] outline. Linear vertices use [`PolygonVertex::linear`];
 /// arc vertices carry the arc geometry inline.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct PolygonVertex {
     pub point: CoordPoint,
-    /// 0 = linear, 1 = arc.
-    pub kind: i32,
+    /// How the vertex runs to the next.
+    pub kind: VertexKind,
     pub arc_center: CoordPoint,
     pub start_angle: f64,
     pub end_angle: f64,
@@ -25,7 +74,7 @@ impl PolygonVertex {
     pub fn linear(point: CoordPoint) -> Self {
         Self {
             point,
-            kind: 0,
+            kind: VertexKind::Line,
             ..Self::default()
         }
     }

@@ -360,6 +360,12 @@ pub struct Pad {
 
     pub paste_mask_expansion: Coord,
     pub solder_mask_expansion: Coord,
+    /// How [`Self::paste_mask_expansion`] applies: none, the design rules,
+    /// or this value (manual).
+    pub paste_mask_expansion_mode: crate::MaskExpansionMode,
+    /// How [`Self::solder_mask_expansion`] applies: none, the design
+    /// rules, or this value (manual).
+    pub solder_mask_expansion_mode: crate::MaskExpansionMode,
     pub solder_mask_expansion_from_hole_edge: bool,
     pub solder_mask_expansion_from_hole_edge_with_rule: bool,
 
@@ -541,6 +547,8 @@ impl Default for Pad {
             relief_entries: 4,
             paste_mask_expansion: Coord::ZERO,
             solder_mask_expansion: Coord::ZERO,
+            paste_mask_expansion_mode: crate::MaskExpansionMode::None,
+            solder_mask_expansion_mode: crate::MaskExpansionMode::None,
             solder_mask_expansion_from_hole_edge: false,
             solder_mask_expansion_from_hole_edge_with_rule: false,
             is_tenting_top: false,
@@ -723,6 +731,11 @@ pub struct Via {
     pub trailing_reserved_i16: i16,
     /// `i32` reserved field at the end of the via record (default `259`).
     pub trailing_reserved_i32: i32,
+    /// The via's Pad/Via Library template (`{GUID}`), as its own record
+    /// names it (Altium 22 and later), where it names one.
+    pub template_id: Option<String>,
+    /// The library of [`Self::template_id`].
+    pub template_library_id: Option<String>,
 
     /// Original on-disk record body, preserved so unmodeled bytes (union
     /// membership, teardrop flags, format tails) survive write-back. The
@@ -800,6 +813,8 @@ impl Default for Via {
             reserved_byte_after_mask_flag: 1,
             trailing_reserved_i16: 15,
             trailing_reserved_i32: 259,
+            template_id: None,
+            template_library_id: None,
             raw_record: None,
         }
     }
@@ -951,8 +966,15 @@ pub struct Region {
     /// Hole outlines (cutouts) following the main outline on disk.
     #[cfg_attr(feature = "serde", serde(default))]
     pub holes: Vec<Vec<CoordPoint>>,
+    /// The outline's vertices as the file stores them: doubles in raw
+    /// units (a ten-thousandth of a mil), which [`Self::outline`] rounds.
+    pub outline_exact: Vec<(f64, f64)>,
+    /// The holes' vertices as the file stores them, as
+    /// [`Self::outline_exact`].
+    pub holes_exact: Vec<Vec<(f64, f64)>>,
     pub layer: i32,
-    pub kind: i32,
+    /// What the region is (`KIND`).
+    pub kind: RegionKind,
     /// Index into the document's `Nets6` table; `0` means "no net".
     pub net_index: u16,
     /// Index into the document's `Components6` table; `-1` for free regions.
@@ -979,9 +1001,12 @@ pub struct Region {
     /// The region is a teardrop (flag bit 4).
     #[cfg_attr(feature = "serde", serde(default))]
     pub is_teardrop: bool,
-    /// The pad (index into the component's pad list) this region belongs to,
-    /// from the record's `PADINDEX`; rewritten as the pad's record ordinal on
-    /// write.
+    /// The pad this region is the shape of (a custom pad's copper), from
+    /// the record's `PADINDEX`: in a library footprint an index into the
+    /// component's pad list, in a document an index into
+    /// [`Document::pads`](super::Document::pads) (a document component's
+    /// clone of the region carries the same). Rewritten as the pad's record
+    /// ordinal on write.
     #[cfg_attr(feature = "serde", serde(default))]
     pub pad_ref: Option<usize>,
     pub cavity_height: Coord,
@@ -1022,6 +1047,8 @@ pub struct Region {
     pub moveable: bool,
     pub is_simple_region: bool,
     pub virtual_cutout: bool,
+    /// Whether the region cuts the board itself (`ISBOARDCUTOUT`).
+    pub is_board_cutout: bool,
     pub hole_count: i32,
     pub total_vertex_count: i32,
     pub area: i64,
@@ -1048,8 +1075,10 @@ impl Default for Region {
         Self {
             outline: Vec::new(),
             holes: Vec::new(),
+            outline_exact: Vec::new(),
+            holes_exact: Vec::new(),
             layer: 0,
-            kind: 0,
+            kind: RegionKind::Copper,
             net_index: 0,
             component_index: -1,
             net: None,
@@ -1094,6 +1123,7 @@ impl Default for Region {
             moveable: false,
             is_simple_region: false,
             virtual_cutout: false,
+            is_board_cutout: false,
             hole_count: 0,
             total_vertex_count: 0,
             area: 0,
@@ -1604,6 +1634,95 @@ impl ComponentBody {
         }
         acc
     }
+}
+
+/// What a region is: its stored `KIND` (the meanings are those `KiCad`'s
+/// Altium importer gives them). A stored value outside the four is kept as
+/// [`RegionKind::Unknown`] so it writes back unchanged. Serialized as the
+/// stored integer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "serde", serde(from = "i32", into = "i32"))]
+pub enum RegionKind {
+    /// Copper, or a board cutout where the region says so (`KIND` 0).
+    #[default]
+    Copper,
+    /// A cutout in a polygon pour (`KIND` 1).
+    PolygonCutout,
+    /// A dashed outline (`KIND` 2).
+    DashedOutline,
+    /// A cavity definition (`KIND` 4).
+    Cavity,
+    /// Another stored value, kept verbatim.
+    Unknown(i32),
+}
+
+impl RegionKind {
+    /// The kind a stored `KIND` integer names.
+    pub fn from_raw(value: i32) -> Self {
+        match value {
+            0 => Self::Copper,
+            1 => Self::PolygonCutout,
+            2 => Self::DashedOutline,
+            4 => Self::Cavity,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The integer this kind is stored as.
+    pub fn to_raw(self) -> i32 {
+        match self {
+            Self::Copper => 0,
+            Self::PolygonCutout => 1,
+            Self::DashedOutline => 2,
+            Self::Cavity => 4,
+            Self::Unknown(value) => value,
+        }
+    }
+}
+
+impl From<i32> for RegionKind {
+    fn from(value: i32) -> Self {
+        Self::from_raw(value)
+    }
+}
+
+impl From<RegionKind> for i32 {
+    fn from(kind: RegionKind) -> i32 {
+        kind.to_raw()
+    }
+}
+
+/// One vertex of a [`ShapeBasedRegion`]: a point, and where it starts an
+/// arc, the arc's centre, radius and angles (degrees, counter-clockwise).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ShapeVertex {
+    /// Whether the run from this vertex to the next is an arc.
+    pub is_round: bool,
+    pub point: CoordPoint,
+    pub center: CoordPoint,
+    pub radius: Coord,
+    pub start_angle: f64,
+    pub end_angle: f64,
+}
+
+/// A region of `ShapeBasedRegions6`: the shape Altium keeps beside a
+/// `Regions6` region (a pour's piece, a pad's custom shape) with its arcs
+/// exact. Its outline closes on its last vertex (the first repeated); its
+/// holes are linear, in raw units as stored.
+#[derive(Debug, Clone, Default, PartialEq)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub struct ShapeBasedRegion {
+    pub layer: i32,
+    pub net_index: u16,
+    pub component_index: i32,
+    /// What the region is (`KIND`).
+    pub kind: RegionKind,
+    pub vertices: Vec<ShapeVertex>,
+    pub holes: Vec<Vec<(f64, f64)>>,
+    /// Every parameter of the record, keys as written.
+    pub parameters: BTreeMap<String, String>,
 }
 
 /// A named electrical net.

@@ -26,6 +26,7 @@
 
 use std::path::Path;
 
+#[cfg(feature = "async")]
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::bom::BomDocument;
@@ -134,6 +135,7 @@ pub enum AltiumFile {
 
 impl AltiumFile {
     /// Open an Altium file from disk; the kind is detected from the extension.
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref();
         let kind = AltiumFileKind::from_path(path).ok_or_else(|| {
@@ -167,6 +169,7 @@ impl AltiumFile {
     }
 
     /// Parse from any [`AsyncRead`] given an explicit kind.
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(kind: AltiumFileKind, mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
@@ -191,6 +194,7 @@ impl AltiumFile {
 
     /// Write to disk. The variant determines the on-disk layout — the path's
     /// extension is **not** rewritten. Make sure it matches `self.kind()`.
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
@@ -373,6 +377,7 @@ impl From<LibraryPackage> for AltiumFile {
 
 /// Open any Altium file with kind detected from the extension. Convenience
 /// wrapper around [`AltiumFile::read`].
+#[cfg(feature = "async")]
 pub async fn open(path: impl AsRef<Path>) -> Result<AltiumFile> {
     AltiumFile::read(path).await
 }
@@ -523,6 +528,7 @@ mod tests {
         assert!(!AltiumFileKind::IntegratedLibrary.is_document());
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn read_intlib_from_disk_round_trips_through_cli_dispatch() {
         // Build a synthetic IntLib, write it to a temp path, and verify
@@ -577,6 +583,7 @@ mod tests {
         assert!(f.into_sch_library().is_none());
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn read_unrecognised_extension_errors() {
         let p = PathBuf::from("/tmp/no-such.unknownext");
@@ -585,6 +592,7 @@ mod tests {
         assert!(msg.contains("unrecognised"), "got: {msg}");
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn read_then_write_round_trips_pcblib() {
         let nonce = std::process::id();

@@ -2,10 +2,12 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Seek, Write};
+#[cfg(feature = "async")]
 use std::path::Path;
 
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
+#[cfg(feature = "async")]
 use tokio::io::AsyncWrite;
 
 use super::binary::{
@@ -41,6 +43,7 @@ impl Library {
     }
 
     /// Write to disk as a `.PcbLib`.
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
@@ -48,10 +51,12 @@ impl Library {
     }
 
     /// Write to any `AsyncWrite`.
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncWriteExt;
         let bytes = self.to_bytes()?;
         writer.write_all(&bytes).await?;
@@ -1019,16 +1024,17 @@ fn write_pad<W: Write + Seek>(bw: &mut BinaryWriter<W>, pad: &Pad) -> Result<()>
         w.write_i32(pad.paste_mask_expansion.to_raw())?;
         w.write_i32(pad.solder_mask_expansion.to_raw())?;
         w.write_fill(0, 7)?;
-        w.write_u8(if pad.paste_mask_expansion.to_raw() != 0 {
-            2
-        } else {
-            0
-        })?;
-        w.write_u8(if pad.solder_mask_expansion.to_raw() != 0 {
-            2
-        } else {
-            0
-        })?;
+        // A mode left unset on a pad given an expansion value is written
+        // manual (the value is the pad's own), as before modes were read.
+        let mode = |mode: crate::MaskExpansionMode, value: Coord| {
+            if mode == crate::MaskExpansionMode::None && value.to_raw() != 0 {
+                2
+            } else {
+                mode.to_raw()
+            }
+        };
+        w.write_u8(mode(pad.paste_mask_expansion_mode, pad.paste_mask_expansion))?;
+        w.write_u8(mode(pad.solder_mask_expansion_mode, pad.solder_mask_expansion))?;
         w.write_u8(pad.drill_type as u8)?;
         w.write_i16(0)?;
         w.write_i32(0)?;
@@ -1404,7 +1410,15 @@ fn splice_region_raw(raw: &[u8], region: &Region, pad_ordinal: Option<usize>) ->
     // A region that belongs to a pad names it by record ordinal; rewrite it
     // for the order being emitted.
     let raw_owned;
-    let raw = if let Some(ordinal) = pad_ordinal {
+    // The ordinal the record already holds is kept byte for byte.
+    let stated = {
+        let params = &raw[22..geo_start];
+        let text = crate::encoding::decode(params.strip_suffix(&[0]).unwrap_or(params));
+        text.split('|')
+            .find(|kv| kv.to_ascii_uppercase().starts_with("PADINDEX="))
+            .and_then(|kv| kv[9..].trim().parse::<usize>().ok())
+    };
+    let raw = if let Some(ordinal) = pad_ordinal.filter(|ordinal| Some(*ordinal) != stated) {
         let params = &raw[22..geo_start];
         let text = crate::encoding::decode(params.strip_suffix(&[0]).unwrap_or(params));
         let rewritten: String = text
@@ -1564,7 +1578,7 @@ fn write_region<W: Write + Seek>(
         let mut params = ParameterMap::new();
         params.insert("V7_LAYER", layer_byte_to_name(region.layer as u8));
         params.insert("NAME", region.name.clone().unwrap_or_else(|| " ".into()));
-        params.insert("KIND", region.kind.to_string());
+        params.insert("KIND", region.kind.to_raw().to_string());
         params.insert("SUBPOLYINDEX", region.sub_poly_index.to_string());
         params.insert("UNIONINDEX", region.union_index.to_string());
         params.insert(
@@ -1943,6 +1957,7 @@ impl Document {
     }
 
     /// Write to disk as a `.PcbDoc`.
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
@@ -1950,10 +1965,12 @@ impl Document {
     }
 
     /// Write to any `AsyncWrite`.
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncWriteExt;
         let bytes = self.to_bytes()?;
         writer.write_all(&bytes).await?;
@@ -2508,7 +2525,9 @@ write_doc_collection!(write_doc_vias, vias, "Vias6", 3, write_via);
 write_doc_collection!(write_doc_tracks, tracks, "Tracks6", 4, write_track);
 write_doc_collection!(write_doc_fills, fills, "Fills6", 6, write_fill);
 fn write_region_doc<W: Write + Seek>(bw: &mut BinaryWriter<W>, region: &Region) -> Result<()> {
-    write_region(bw, region, None)
+    // A document region's pad is named by its 1-based ordinal in `Pads6`,
+    // which the document writes in `Document::pads` order.
+    write_region(bw, region, region.pad_ref.map(|index| index + 1))
 }
 write_doc_collection!(write_doc_regions, regions, "Regions6", 11, write_region_doc);
 write_doc_collection!(

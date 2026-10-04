@@ -1,13 +1,16 @@
 //! Top-level PCB document (`.PcbDoc`).
 
 use std::collections::BTreeMap;
+#[cfg(feature = "async")]
 use std::path::Path;
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 use super::component::Component;
-use super::embedded::{BoardLoader, EmbeddedBoard, FileBoardLoader};
+#[cfg(feature = "async")]
+use super::embedded::FileBoardLoader;
+use super::embedded::{BoardLoader, EmbeddedBoard};
 use super::layer::LayerStack;
 use super::polygon::Polygon;
 use super::primitives::{Arc, ComponentBody, Fill, Net, Pad, Region, Text, Track, Via};
@@ -67,6 +70,86 @@ impl Document {
     pub fn layer_stack(&self) -> Option<LayerStack> {
         let params = self.board_parameters.as_ref()?;
         LayerStack::from_board_parameters(params)
+    }
+
+    /// The board outline ([`super::board::board_outline`]): its vertices in
+    /// order, arcs with their centres and angles; `Ok(None)` where the board
+    /// states none.
+    ///
+    /// # Errors
+    ///
+    /// As [`super::board::board_outline`]: a vertex whose key is missing or
+    /// malformed.
+    pub fn board_outline(&self) -> Result<Option<Vec<super::polygon::PolygonVertex>>> {
+        match &self.board_parameters {
+            Some(params) => super::board::board_outline(params),
+            None => Ok(None),
+        }
+    }
+
+    /// The regions of `ShapeBasedRegions6`: each region's shape with its
+    /// arcs exact ([`super::primitives::ShapeBasedRegion`]). Empty where the
+    /// board has none.
+    ///
+    /// # Errors
+    ///
+    /// [`crate::Error::Corrupt`] where a record holds fewer bytes than its
+    /// vertex counts say.
+    pub fn shape_based_regions(&self) -> Result<Vec<super::primitives::ShapeBasedRegion>> {
+        match self.additional_streams.get("ShapeBasedRegions6/Data") {
+            Some(data) => super::reader::read_shape_based_regions(data),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    /// The board's Pad/Via Library ([`super::padvia`]): its templates, the
+    /// primitives linked to them, and the libraries it caches.
+    pub fn pad_via_libraries(&self) -> super::padvia::PadViaLibraries {
+        super::padvia::read(&self.additional_streams)
+    }
+
+    /// How the via at `index` resolves to a template: by its link in the
+    /// library, else by the template its own record names; unresolved where
+    /// the file does not hold that template.
+    pub fn via_template<'a>(
+        &'a self,
+        libraries: &'a super::padvia::PadViaLibraries,
+        index: usize,
+    ) -> super::padvia::ViaTemplateLink<'a> {
+        use super::padvia::ViaTemplateLink;
+        let linked = libraries
+            .links
+            .iter()
+            .find(|link| link.object.eq_ignore_ascii_case("Via") && link.primitive_index == index);
+        let (template_id, library_id) = match linked {
+            Some(link) => (link.template_id.as_str(), link.library_id.as_str()),
+            None => match self.vias.get(index).and_then(|via| via.template_id.as_deref()) {
+                Some(template_id) => (
+                    template_id,
+                    self.vias[index].template_library_id.as_deref().unwrap_or(""),
+                ),
+                None => return ViaTemplateLink::None,
+            },
+        };
+        match libraries.template(template_id) {
+            Some(template) => ViaTemplateLink::Resolved(template),
+            None => ViaTemplateLink::Unresolved {
+                template_id,
+                library_id,
+            },
+        }
+    }
+
+    /// The board's 3D view configuration (colours, opacities, what is
+    /// shown), where the board states one.
+    pub fn view_config_3d(&self) -> Option<super::board::ViewConfig3d> {
+        super::board::view_config_3d(self.board_parameters.as_ref()?)
+    }
+
+    /// The board's 2D view configuration (which layers are shown), where
+    /// the board states one.
+    pub fn view_config_2d(&self) -> Option<super::board::ViewConfig2d> {
+        super::board::view_config_2d(self.board_parameters.as_ref()?)
     }
 
     /// The document's display unit (`DISPLAYUNIT` in `Board6`): `Some(0)`
@@ -231,6 +314,7 @@ impl Document {
     /// }
     /// # Ok(()) }
     /// ```
+    #[cfg(feature = "async")]
     pub async fn resolve_embedded_boards_at(
         &self,
         parent_dir: impl AsRef<Path>,
@@ -309,6 +393,7 @@ impl Document {
 
     /// Filesystem-backed wrapper around
     /// [`flatten_embedded_boards_with`](Self::flatten_embedded_boards_with).
+    #[cfg(feature = "async")]
     pub async fn flatten_embedded_boards_at(
         &self,
         parent_dir: impl AsRef<Path>,

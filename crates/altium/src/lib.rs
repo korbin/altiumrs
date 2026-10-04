@@ -32,12 +32,14 @@ pub use color::Color;
 pub use coord::{Coord, CoordPoint, CoordRect, ParseCoordError};
 pub use diagnostic::Diagnostic;
 pub use enums::{
-    DiagnosticSeverity, LineStyle, PadHoleType, PadShape, PcbStrokeFont, PcbTextKind,
+    DiagnosticSeverity, LineStyle, MaskExpansionMode, PadHoleType, PadShape, PcbStrokeFont, PcbTextKind,
     PinElectricalType, PinOrientation, PowerPortStyle, SchLineStyle, TextHAlign, TextJustification,
     TextVAlign,
 };
 pub use error::{Error, Result};
-pub use file::{AltiumFile, AltiumFileKind, open};
+#[cfg(feature = "async")]
+pub use file::open;
+pub use file::{AltiumFile, AltiumFileKind};
 pub use intlib::{
     CrossRefRecord, CrossReferenceFootprint, CrossReferenceSymbol, CrossReferenceTable,
     IntegratedLibrary, NamedLibrary, flatten_cross_reference_table, parse_cross_reference,

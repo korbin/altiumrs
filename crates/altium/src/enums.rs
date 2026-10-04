@@ -180,6 +180,45 @@ impl PadShape {
     }
 }
 
+/// How a pad's paste or solder-mask expansion is decided: not at all, by
+/// the design rules, or by the pad's own value (the byte Altium stores
+/// beside each expansion in a `Pads6` record: 0, 1, 2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+pub enum MaskExpansionMode {
+    /// No expansion mode stored (raw 0).
+    #[default]
+    None,
+    /// From the board's design rules (raw 1).
+    Rule,
+    /// The pad's own expansion value (raw 2).
+    Manual,
+    /// A byte outside the known set, kept verbatim.
+    Unknown(u8),
+}
+
+impl MaskExpansionMode {
+    /// The mode a stored byte names.
+    pub fn from_raw(value: u8) -> Self {
+        match value {
+            0 => Self::None,
+            1 => Self::Rule,
+            2 => Self::Manual,
+            other => Self::Unknown(other),
+        }
+    }
+
+    /// The byte this mode is stored as.
+    pub fn to_raw(self) -> u8 {
+        match self {
+            Self::None => 0,
+            Self::Rule => 1,
+            Self::Manual => 2,
+            Self::Unknown(v) => v,
+        }
+    }
+}
+
 impl Default for PadShape {
     fn default() -> Self {
         Self::Round

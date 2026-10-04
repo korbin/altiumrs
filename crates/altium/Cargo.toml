@@ -8,7 +8,12 @@ rust-version.workspace = true
 description = "Read and write Altium Designer files (.SchLib, .SchDoc, .PcbLib, .PcbDoc, .IntLib, .LibPkg, .BomDoc)"
 
 [features]
-default = []
+# `async` (on by default) is the `tokio`-based file API: `read`, `write`,
+# `read_async`, `write_async`, `open` and the embedded-board resolvers.
+# Without it the synchronous `from_bytes` / `to_bytes` API builds with no
+# `tokio` in the tree.
+default = ["async"]
+async = ["dep:tokio"]
 serde = ["dep:serde", "dep:serde_repr", "dep:base64"]
 render = ["dep:tiny-skia", "dep:cosmic-text", "dep:fontdb"]
 
@@ -20,7 +25,7 @@ flate2.workspace = true
 indexmap.workspace = true
 thiserror.workspace = true
 byteorder.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "rt"] }
+tokio = { workspace = true, features = ["fs", "io-util", "rt"], optional = true }
 serde = { workspace = true, optional = true }
 serde_repr = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }

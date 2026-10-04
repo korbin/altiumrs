@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read};
+#[cfg(feature = "async")]
 use std::path::Path;
 
+#[cfg(feature = "async")]
 use tokio::io::AsyncRead;
 
 use super::binary::{
@@ -70,15 +72,18 @@ impl Library {
         Ok(library)
     }
 
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
     }
 
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
@@ -708,15 +713,18 @@ impl Document {
         Ok(document)
     }
 
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
     }
 
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;

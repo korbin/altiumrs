@@ -2,8 +2,10 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Seek, Write};
+#[cfg(feature = "async")]
 use std::path::Path;
 
+#[cfg(feature = "async")]
 use tokio::io::AsyncWrite;
 
 use super::binary::{
@@ -64,16 +66,19 @@ impl Library {
         cf.into_bytes()
     }
 
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
         Ok(())
     }
 
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncWriteExt;
         let bytes = self.to_bytes()?;
         writer.write_all(&bytes).await?;
@@ -1137,16 +1142,19 @@ impl Document {
         cf.into_bytes()
     }
 
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
         Ok(())
     }
 
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncWriteExt;
         let bytes = self.to_bytes()?;
         writer.write_all(&bytes).await?;

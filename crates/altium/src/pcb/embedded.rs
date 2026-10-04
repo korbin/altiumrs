@@ -169,6 +169,7 @@ impl EmbeddedBoard {
     /// case-insensitive directory scan when the literal path doesn't exist
     /// (Altium files authored on Windows may carry casing that differs from
     /// the file as it ended up on a Unix filesystem).
+    #[cfg(feature = "async")]
     pub async fn resolve_at(&self, parent_dir: impl AsRef<Path>) -> Result<Document> {
         let loader = FileBoardLoader::new(parent_dir.as_ref().to_path_buf());
         self.resolve_with(&loader)

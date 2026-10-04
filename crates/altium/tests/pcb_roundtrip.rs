@@ -459,6 +459,7 @@ fn pcbdoc_typed_storages_populate() {
 
 // ─── Embedded sub-board dereferencing ──────────────────────────────────────
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn embedded_board_resolves_against_testdata_pair() {
     // `Power Adapter Panel.PcbDoc` references `USB Power Adapter.PcbDoc` as a
@@ -515,6 +516,7 @@ async fn embedded_board_resolves_against_testdata_pair() {
     assert_eq!(sub_again.components.len(), component_count);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn embedded_board_custom_loader_can_intercept() {
     use altium::pcb::{BoardLoader, FileBoardLoader};
@@ -556,6 +558,7 @@ async fn embedded_board_custom_loader_can_intercept() {
 
 // ─── Embedded sub-board flattening ────────────────────────────────────────
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn flatten_embedded_boards_inlines_subdoc_primitives() {
     let Some(dir) = testdata_dir() else {
@@ -622,6 +625,7 @@ async fn flatten_embedded_boards_inlines_subdoc_primitives() {
     }
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
     use altium::pcb::EmbeddedBoard;
@@ -691,6 +695,7 @@ async fn flatten_array_replicates_subdoc_pads_at_correct_offsets() {
     assert_eq!(got, expected);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn flatten_subtracts_child_origin_and_remaps_indices() {
     use altium::pcb::EmbeddedBoard;
@@ -788,6 +793,7 @@ async fn flatten_subtracts_child_origin_and_remaps_indices() {
     assert_eq!(flat.components[1].pads[0].component_index, 1);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn flatten_unresolved_board_is_preserved_with_diagnostic() {
     use altium::pcb::EmbeddedBoard;
@@ -834,6 +840,7 @@ async fn flatten_unresolved_board_is_preserved_with_diagnostic() {
     let _ = CoordPoint::default(); // suppress unused-import warning if test path skips
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn flatten_self_referencing_board_caps_recursion() {
     use altium::pcb::EmbeddedBoard;
@@ -888,6 +895,7 @@ async fn flatten_self_referencing_board_caps_recursion() {
     let _ = CoordPoint::default();
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn embedded_board_resolution_fails_cleanly_when_sibling_missing() {
     // Resolving against an empty directory should produce a structured error

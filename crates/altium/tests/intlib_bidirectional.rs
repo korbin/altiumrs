@@ -33,6 +33,7 @@ fn fixture_pcblib() -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn reads_real_altium_compiled_intlib() {
     let Some(path) = fixture_intlib() else {
@@ -95,6 +96,7 @@ async fn reads_real_altium_compiled_intlib() {
     }
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn intlib_round_trips_through_writer() {
     let Some(path) = fixture_intlib() else {
@@ -141,6 +143,7 @@ async fn intlib_round_trips_through_writer() {
     }
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn embedded_libraries_match_source_files_byte_level() {
     // Sanity check: the libraries we extract from the IntLib should match
@@ -182,6 +185,7 @@ async fn embedded_libraries_match_source_files_byte_level() {
     assert_eq!(inner_pcb_names, source_pcb_names, "PcbLib component names");
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn intlib_disk_round_trip() {
     // Read → write to a temp file → read again and verify equivalence.
@@ -207,6 +211,7 @@ async fn intlib_disk_round_trip() {
     let _ = std::fs::remove_file(&dst);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn from_scratch_intlib_round_trips() {
     // Build a synthetic IntLib that mimics the Altium layout (numbered names,
@@ -244,6 +249,7 @@ async fn from_scratch_intlib_round_trips() {
     assert!(parsed.additional_files.is_empty());
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn split_real_intlib_to_libpkg_and_sources() {
     // Read the real IntLib, split it to a temp directory, verify the source
@@ -290,6 +296,7 @@ async fn split_real_intlib_to_libpkg_and_sources() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn write_real_intlib_back_then_extract_libraries() {
     // Read → write → re-read → split: the sub-libraries that come out at the
@@ -321,6 +328,7 @@ async fn write_real_intlib_back_then_extract_libraries() {
     let _ = std::fs::remove_file(&written_path);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn parameters_bin_decoder_extracts_real_component_metadata() {
     let Some(path) = fixture_intlib() else {
@@ -353,6 +361,7 @@ async fn parameters_bin_decoder_extracts_real_component_metadata() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn parameters_bin_byte_stable_round_trip_on_real_fixture() {
     let Some(path) = fixture_intlib() else {
@@ -374,6 +383,7 @@ async fn parameters_bin_byte_stable_round_trip_on_real_fixture() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn cross_reference_decoder_extracts_real_component_paths() {
     let Some(path) = fixture_intlib() else {
@@ -418,6 +428,7 @@ async fn cross_reference_decoder_extracts_real_component_paths() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn cross_reference_byte_stable_round_trip_on_real_fixture() {
     let Some(path) = fixture_intlib() else {
@@ -439,6 +450,7 @@ async fn cross_reference_byte_stable_round_trip_on_real_fixture() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn cross_reference_table_decodes_real_fixture() {
     let Some(path) = fixture_intlib() else {
@@ -482,6 +494,7 @@ async fn cross_reference_table_decodes_real_fixture() {
     }
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn cross_reference_table_byte_stable_round_trip_on_real_fixture() {
     let Some(path) = fixture_intlib() else {
@@ -509,6 +522,7 @@ async fn cross_reference_table_byte_stable_round_trip_on_real_fixture() {
     );
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn intlib_full_byte_round_trip_via_typed_codecs() {
     // Read the full IntLib, decode every typed surface (libraries, parameters,
@@ -541,6 +555,7 @@ async fn intlib_full_byte_round_trip_via_typed_codecs() {
     assert_eq!(parsed.footprint_libraries.len(), 1);
 }
 
+#[cfg(feature = "async")]
 #[tokio::test]
 async fn altium_file_unified_dispatch_finds_intlib() {
     let Some(path) = fixture_intlib() else {

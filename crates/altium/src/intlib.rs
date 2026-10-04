@@ -32,11 +32,13 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Write};
+#[cfg(feature = "async")]
 use std::path::Path;
 
 use flate2::Compression;
 use flate2::read::ZlibDecoder;
 use flate2::write::ZlibEncoder;
+#[cfg(feature = "async")]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 #[cfg(feature = "serde")]
@@ -233,12 +235,14 @@ impl IntegratedLibrary {
     }
 
     /// Async read from disk.
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
     }
 
     /// Async read from any [`AsyncRead`].
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
@@ -302,6 +306,7 @@ impl IntegratedLibrary {
     }
 
     /// Async write to disk.
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         let bytes = self.to_bytes()?;
         tokio::fs::write(path, bytes).await?;
@@ -309,6 +314,7 @@ impl IntegratedLibrary {
     }
 
     /// Async write to any [`AsyncWrite`].
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,

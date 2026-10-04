@@ -4,9 +4,11 @@
 
 use std::collections::BTreeMap;
 use std::io::{Cursor, Read, Seek};
+#[cfg(feature = "async")]
 use std::path::Path;
 
 use indexmap::IndexMap;
+#[cfg(feature = "async")]
 use tokio::io::AsyncRead;
 
 use super::binary::{ObjectId, PrimitiveFlags, read_common_prefix, read_coord_point};
@@ -43,16 +45,19 @@ impl Library {
     }
 
     /// Read a `.PcbLib` from disk.
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
     }
 
     /// Read a `.PcbLib` from any `AsyncRead`.
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
@@ -509,6 +514,8 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     let mut solder_mask_expansion = 0i32;
     let mut drill_type = 0u8;
     let mut jumper_id = 0i16;
+    let mut paste_mask_mode = 0u8;
+    let mut solder_mask_mode = 0u8;
 
     if block_size - (br.position()? - start) >= 25 {
         br.skip(1)?; // offset 61
@@ -526,7 +533,10 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
         solder_mask_expansion = br.read_i32()?;
     }
     if block_size - (br.position()? - start) >= 16 {
-        br.skip(9)?;
+        br.skip(7)?;
+        // The expansions' modes: 0 none, 1 the rules, 2 manual.
+        paste_mask_mode = br.read_u8()?;
+        solder_mask_mode = br.read_u8()?;
         drill_type = br.read_u8()?;
         br.skip(6)?;
     }
@@ -648,6 +658,8 @@ fn read_pad<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Pad>> {
     pad.power_plane_relief_expansion = Coord::from_raw(power_plane_relief_expansion);
     pad.paste_mask_expansion = Coord::from_raw(paste_mask_expansion);
     pad.solder_mask_expansion = Coord::from_raw(solder_mask_expansion);
+    pad.paste_mask_expansion_mode = crate::MaskExpansionMode::from_raw(paste_mask_mode);
+    pad.solder_mask_expansion_mode = crate::MaskExpansionMode::from_raw(solder_mask_mode);
     pad.drill_type = i32::from(drill_type);
     pad.jumper_id = i32::from(jumper_id);
     pad.layer_x_sizes = layer_x_sizes;
@@ -798,6 +810,13 @@ fn read_via<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Via>> {
         }
     }
 
+    // The via's Pad/Via Library template and that template's library, as
+    // two GUIDs at bytes 268..300 of the main block (Altium 22 and later
+    // write them there; all zero where the via has no template).
+    if let Some(guids) = body.get(268..300) {
+        via.template_id = super::padvia::guid_text(&guids[..16]);
+        via.template_library_id = super::padvia::guid_text(&guids[16..]);
+    }
     via.raw_record = Some(body);
     Ok(Some(via))
 }
@@ -1102,6 +1121,108 @@ fn read_fill<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Fill>> {
     Ok(Some(fill))
 }
 
+/// A stored double in raw units as the nearest raw coordinate.
+fn raw_coord(value: f64) -> Coord {
+    Coord::from_raw(value.round() as i32)
+}
+
+/// One `ShapeBasedRegions6` record: a region whose outline vertices carry
+/// their arcs exactly ([`super::primitives::ShapeVertex`]) and whose holes
+/// are linear, as `Regions6` writes them.
+pub(crate) fn read_shape_based_region<R: Read + Seek>(
+    br: &mut BinaryReader<R>,
+) -> Result<Option<super::primitives::ShapeBasedRegion>> {
+    let body = br.read_block()?;
+    if body.is_empty() {
+        return Ok(None);
+    }
+    let size = body.len() as u64;
+    let mut cur = BinaryReader::new(std::io::Cursor::new(body.as_slice()))?;
+    let br = &mut cur;
+    let cp = read_common_prefix(br)?;
+    br.skip(4)?;
+    br.skip(1)?;
+    let parameters = read_param_map(br)?;
+    // The outline's vertex count, and one more: the closing vertex.
+    let count = u64::from(br.read_u32()?) + 1;
+    let per_vertex = 1 + 4 * 5 + 8 * 2;
+    if count * per_vertex > size.saturating_sub(br.position()?) {
+        return Err(Error::corrupt_in(
+            "shape-based region: more vertices than its record holds",
+            "ShapeBasedRegions6",
+        ));
+    }
+    let mut vertices = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        let is_round = br.read_u8()? != 0;
+        let point = read_coord_point(br)?;
+        let center = read_coord_point(br)?;
+        let radius = Coord::from_raw(br.read_i32()?);
+        let start_angle = br.read_f64()?;
+        let end_angle = br.read_f64()?;
+        vertices.push(super::primitives::ShapeVertex {
+            is_round,
+            point,
+            center,
+            radius,
+            start_angle,
+            end_angle,
+        });
+    }
+    let hole_count = parameters.get_i32("HOLECOUNT").unwrap_or(0).max(0);
+    let mut holes = Vec::new();
+    for _ in 0..hole_count {
+        let n = u64::from(br.read_u32()?);
+        if n * 16 > size.saturating_sub(br.position()?) {
+            return Err(Error::corrupt_in(
+                "shape-based region: a hole with more vertices than its record holds",
+                "ShapeBasedRegions6",
+            ));
+        }
+        let mut hole = Vec::with_capacity(n as usize);
+        for _ in 0..n {
+            hole.push((br.read_f64()?, br.read_f64()?));
+        }
+        holes.push(hole);
+    }
+    let mut region = super::primitives::ShapeBasedRegion {
+        layer: i32::from(cp.layer),
+        net_index: if cp.net_index >= 0 {
+            cp.net_index as u16
+        } else {
+            0
+        },
+        component_index: cp.component_index,
+        kind: super::primitives::RegionKind::from_raw(parameters.get_i32("KIND").unwrap_or(0)),
+        vertices,
+        holes,
+        parameters: BTreeMap::new(),
+    };
+    for (key, value, _) in parameters.iter() {
+        region.parameters.insert(key.to_string(), value.to_string());
+    }
+    Ok(Some(region))
+}
+
+/// Every record of a `ShapeBasedRegions6/Data` stream.
+pub(crate) fn read_shape_based_regions(
+    data: &[u8],
+) -> Result<Vec<super::primitives::ShapeBasedRegion>> {
+    let mut br = BinaryReader::new(Cursor::new(data.to_vec()))?;
+    let mut out = Vec::new();
+    while br.has_more()? {
+        let id = br.read_u8()?;
+        if id != ObjectId::Region as u8 {
+            br.skip_block()?;
+            continue;
+        }
+        if let Some(region) = read_shape_based_region(&mut br)? {
+            out.push(region);
+        }
+    }
+    Ok(out)
+}
+
 fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region>> {
     let body = br.read_block()?;
     if body.is_empty() {
@@ -1123,11 +1244,13 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
     region.layer = i32::from(layer);
     region.net_index = if net_idx >= 0 { net_idx as u16 } else { 0 };
     region.component_index = ci;
-    region.kind = parameters.get_i32("KIND").unwrap_or(0);
+    region.kind = super::primitives::RegionKind::from_raw(parameters.get_i32("KIND").unwrap_or(0));
     for _ in 0..vertex_count {
-        let x = Coord::from_raw(br.read_f64()? as i32);
-        let y = Coord::from_raw(br.read_f64()? as i32);
-        region.outline.push(CoordPoint::new(x, y));
+        let (x, y) = (br.read_f64()?, br.read_f64()?);
+        region.outline_exact.push((x, y));
+        region
+            .outline
+            .push(CoordPoint::new(raw_coord(x), raw_coord(y)));
     }
 
     // Hole outlines follow the main outline, one [u32 n][n x (f64,f64)]
@@ -1144,12 +1267,14 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
             break;
         }
         let mut hole = Vec::with_capacity(n as usize);
+        let mut exact = Vec::with_capacity(n as usize);
         for _ in 0..n {
-            let x = Coord::from_raw(br.read_f64()? as i32);
-            let y = Coord::from_raw(br.read_f64()? as i32);
-            hole.push(CoordPoint::new(x, y));
+            let (x, y) = (br.read_f64()?, br.read_f64()?);
+            exact.push((x, y));
+            hole.push(CoordPoint::new(raw_coord(x), raw_coord(y)));
         }
         region.holes.push(hole);
+        region.holes_exact.push(exact);
     }
 
     let consumed = br.position()? - start;
@@ -1273,6 +1398,9 @@ fn read_region<R: Read + Seek>(br: &mut BinaryReader<R>) -> Result<Option<Region
     }
     if let Some(v) = parameters.get("ISSIMPLEREGION") {
         region.is_simple_region = v.eq_ignore_ascii_case("TRUE");
+    }
+    if let Some(v) = parameters.get("ISBOARDCUTOUT") {
+        region.is_board_cutout = v.eq_ignore_ascii_case("TRUE");
     }
     if let Some(v) = parameters.get("VIRTUALCUTOUT") {
         region.virtual_cutout = v.eq_ignore_ascii_case("TRUE");
@@ -1551,6 +1679,7 @@ impl Document {
         read_rooms(&mut cf, &mut document)?;
         read_embedded_boards(&mut cf, &mut document)?;
         resolve_net_names(&mut document);
+        resolve_region_pads(&mut document);
         assign_primitives_to_components(&mut document);
         read_doc_additional_streams(&mut cf, &mut document, &mut diagnostics)?;
 
@@ -1559,16 +1688,19 @@ impl Document {
     }
 
     /// Read a `.PcbDoc` from disk.
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         Self::from_bytes(bytes)
     }
 
     /// Read a `.PcbDoc` from any `AsyncRead`.
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
     {
+        #[cfg(feature = "async")]
         use tokio::io::AsyncReadExt;
         let mut bytes = Vec::new();
         reader.read_to_end(&mut bytes).await?;
@@ -1991,6 +2123,36 @@ fn resolve_net_names(document: &mut Document) {
     for region in &mut document.regions {
         if region.net.is_none() {
             region.net = lookup(region.net_index);
+        }
+    }
+}
+
+/// Resolve each document region's `PADINDEX` (the 1-based ordinal of the
+/// pad in `Pads6` whose shape the region is: a custom pad's copper) to
+/// [`Region::pad_ref`], an index into [`Document::pads`], taking the key out
+/// of the region's additional parameters; the writer writes it back from
+/// `pad_ref`. A `PADINDEX` that names no pad is left where it was.
+fn resolve_region_pads(document: &mut Document) {
+    let pads = document.pads.len();
+    for region in &mut document.regions {
+        let Some(extra) = region.additional_parameters.as_mut() else {
+            continue;
+        };
+        let Some(key) = extra
+            .keys()
+            .find(|k| k.eq_ignore_ascii_case("PADINDEX"))
+            .cloned()
+        else {
+            continue;
+        };
+        let index = extra
+            .get(&key)
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .and_then(|n| n.checked_sub(1))
+            .filter(|&i| i < pads);
+        if let Some(index) = index {
+            region.pad_ref = Some(index);
+            extra.remove(&key);
         }
     }
 }

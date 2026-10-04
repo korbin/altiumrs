@@ -210,7 +210,7 @@ fn apply_to_polygon(t: &WorldTransform, poly: &mut Polygon) {
 
 fn apply_to_polygon_vertex(t: &WorldTransform, v: &mut PolygonVertex) {
     v.point = t.apply_point(v.point);
-    if v.kind != 0 {
+    if v.kind != super::polygon::VertexKind::Line {
         v.arc_center = t.apply_point(v.arc_center);
         apply_to_sweep(t, &mut v.start_angle, &mut v.end_angle);
     }

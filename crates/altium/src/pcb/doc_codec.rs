@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use super::component::Component;
 use super::embedded::EmbeddedBoard;
-use super::polygon::{Polygon, PolygonVertex};
+use super::polygon::{Polygon, PolygonVertex, VertexKind};
 use super::primitives::Net;
 use super::rule::{DifferentialPair, ObjectClass, Room, Rule};
 use crate::coord::{Coord, CoordPoint};
@@ -581,7 +581,7 @@ pub fn polygon_from_params(params: &ParameterMap) -> Polygon {
             }
         } else if old_form {
             for i in 0..count {
-                let kind = params.get_i32(&format!("KIND{i}")).unwrap_or(0);
+                let kind = VertexKind::from_raw(params.get_i32(&format!("KIND{i}")).unwrap_or(0));
                 let vx = params
                     .get(&format!("VX{i}"))
                     .and_then(parse_coord_loose)
@@ -764,7 +764,7 @@ pub fn polygon_to_params(p: &Polygon, params: &mut ParameterMap) {
     // KIND/VX/VY/CX/CY/SA/EA/R keys, or the newer POINTCOUNT + SA<i>.X/Y.
     if p.vertices_use_legacy_form {
         for (i, v) in p.vertices.iter().enumerate() {
-            params.insert(format!("KIND{i}").as_str(), v.kind.to_string());
+            params.insert(format!("KIND{i}").as_str(), v.kind.to_raw().to_string());
             params.insert(format!("VX{i}").as_str(), format_mil_coord(v.point.x));
             params.insert(format!("VY{i}").as_str(), format_mil_coord(v.point.y));
             params.insert(format!("CX{i}").as_str(), format_mil_coord(v.arc_center.x));

@@ -20,12 +20,15 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "async")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use indexmap::IndexMap;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "async")]
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use crate::error::{Error, Result};
@@ -232,6 +235,7 @@ impl LibraryPackage {
     }
 
     /// Read a `.LibPkg` file from disk.
+    #[cfg(feature = "async")]
     pub async fn read(path: impl AsRef<Path>) -> Result<Self> {
         let bytes = tokio::fs::read(path).await?;
         let text = String::from_utf8(bytes)
@@ -240,6 +244,7 @@ impl LibraryPackage {
     }
 
     /// Read from any [`AsyncRead`].
+    #[cfg(feature = "async")]
     pub async fn read_async<R>(mut reader: R) -> Result<Self>
     where
         R: AsyncRead + Unpin,
@@ -273,12 +278,14 @@ impl LibraryPackage {
     }
 
     /// Async write to disk.
+    #[cfg(feature = "async")]
     pub async fn write(&self, path: impl AsRef<Path>) -> Result<()> {
         tokio::fs::write(path, self.to_string_crlf()).await?;
         Ok(())
     }
 
     /// Async write to any [`AsyncWrite`].
+    #[cfg(feature = "async")]
     pub async fn write_async<W>(&self, mut writer: W) -> Result<()>
     where
         W: AsyncWrite + Unpin,
@@ -431,6 +438,7 @@ impl IntegratedLibrary {
     /// nested paths like `"/Embedded/Sub.PcbLib"` are mirrored under `dir`.
     /// Additional files (datasheets, sim models) are written verbatim to
     /// preserve directory layout.
+    #[cfg(feature = "async")]
     pub async fn split_to_directory(
         &self,
         dir: impl AsRef<Path>,
@@ -496,11 +504,14 @@ pub struct SplitResult {
 impl SplitResult {
     /// Persist the `.LibPkg` to its suggested path. Convenience for callers
     /// who don't want to edit the package first.
+    #[cfg(feature = "async")]
     pub async fn write_package(&self) -> Result<()> {
         self.package.write(&self.package_path).await
     }
 }
 
+// Used by the `async` split writer and its tests only.
+#[cfg_attr(not(feature = "async"), allow(dead_code))]
 fn sanitise_relative_path(name: &str, fallback_ext: &str) -> PathBuf {
     // Translate Windows backslashes to native forward slashes so paths like
     // `Datasheets\u1.pdf` from older IntLibs end up under proper subfolders.
@@ -528,6 +539,7 @@ fn sanitise_relative_path(name: &str, fallback_ext: &str) -> PathBuf {
     buf
 }
 
+#[cfg(feature = "async")]
 async fn ensure_parent(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
@@ -594,7 +606,9 @@ impl LibraryPackage {
 #[allow(clippy::field_reassign_with_default)]
 mod tests {
     use super::*;
+    #[cfg(feature = "async")]
     use crate::intlib::NamedLibrary;
+    #[cfg(feature = "async")]
     use crate::{pcb, sch};
 
     #[test]
@@ -684,6 +698,7 @@ mod tests {
         assert!(s.contains("\r\n"));
     }
 
+    #[cfg(feature = "async")]
     #[tokio::test]
     async fn split_intlib_writes_constituent_files_and_libpkg() {
         // Build a synthetic IntLib with one SchLib + one PcbLib + one
